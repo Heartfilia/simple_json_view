@@ -1,0 +1,9 @@
+{
+  "name": "json-pretty-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A pretty JSON formatter with Python dict compatibility",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
