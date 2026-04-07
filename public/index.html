@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>JSON / Python Dict 树视图</title>
+  <title>JSON / Python Dict 查看器</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -13,23 +13,22 @@
       <div class="viewer-column">
         <div class="panel-head actions-right">
           <div class="toolbar">
-            <button id="clearBtn">清空</button>
-            <button id="expandAllBtn" class="secondary">全部展开</button>
-            <button id="collapseAllBtn" class="secondary">全部折叠</button>
+            <button id="clearBtn">清除</button>
+            <button id="collapseAllBtn" class="secondary">全部收起</button>
           </div>
         </div>
-        <textarea id="inputBox" spellcheck="false" placeholder="粘贴 JSON、Python 字典，或带反斜杠转义引号的字符串"></textarea>
-        <div id="statusBar" class="status muted">等待输入内容…</div>
+        <textarea id="inputBox" spellcheck="false" placeholder="粘贴 JSON、Python 字典，或转义后的文本"></textarea>
+        <div id="statusBar" class="status muted">等待粘贴内容</div>
       </div>
 
       <div class="viewer-column">
-        <div id="treeView" class="tree-view empty">粘贴内容后会自动解析并显示在这里</div>
+        <div id="treeView" class="tree-view empty">粘贴后会自动解析并显示在这里</div>
       </div>
     </section>
   </main>
 
   <div id="contextMenu" class="context-menu hidden">
-    <button id="contextUnescapeBtn" class="context-menu-btn">格式化选中文本</button>
+    <button id="contextUnescapeBtn" class="context-menu-btn">处理选中文本</button>
   </div>
 
   <script src="./app.js"></script>
