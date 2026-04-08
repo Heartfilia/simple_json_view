@@ -2,6 +2,7 @@ const inputBox = document.getElementById('inputBox');
 const treeView = document.getElementById('treeView');
 const treePanel = document.getElementById('treePanel');
 const statusBar = document.getElementById('statusBar');
+const processInputBtn = document.getElementById('processInputBtn');
 const themeToggleBtn = document.getElementById('themeToggleBtn');
 const treeSearchInput = document.getElementById('treeSearchInput');
 const searchPrevBtn = document.getElementById('searchPrevBtn');
@@ -45,6 +46,7 @@ let contextTreeMeta = null;
 let copyPathBtn = null;
 let selectedPathKey = '';
 let contextMenuMode = 'input';
+let lastParseFailed = false;
 
 function nextFrame() {
   return new Promise((resolve) => {
@@ -59,6 +61,12 @@ function nextFrame() {
 function setStatus(message, type = 'muted') {
   statusBar.textContent = message;
   statusBar.className = `status ${type}`;
+}
+
+function updateProcessInputButtonVisibility() {
+  const shouldShow = Boolean(inputBox.value.trim()) && lastParseFailed;
+  processInputBtn.classList.toggle('visible', shouldShow);
+  processInputBtn.classList.toggle('attention', shouldShow);
 }
 
 function updateTreeActionButtons() {
@@ -396,6 +404,8 @@ function applyUnescapeToWholeInput() {
 
   inputBox.value = decodeWholeInputText(inputBox.value);
   saveInputDraft(inputBox.value);
+  lastParseFailed = false;
+  updateProcessInputButtonVisibility();
   processInput();
   setStatus('已处理输入框内容', 'success');
   return true;
@@ -759,9 +769,11 @@ async function processInput() {
 
   if (!inputValue.trim()) {
     currentData = null;
+    lastParseFailed = false;
     treeView.textContent = '粘贴后会自动解析并显示在这里';
     treeView.classList.add('empty');
     setStatus('等待粘贴内容', 'muted');
+    updateProcessInputButtonVisibility();
     return;
   }
 
@@ -778,6 +790,8 @@ async function processInput() {
     if (renderToken !== latestRenderToken || parsed === null) return;
 
     currentData = parsed;
+    lastParseFailed = false;
+    updateProcessInputButtonVisibility();
     const startRender = async () => {
       await renderTreeAsync(parsed, renderToken);
       if (renderToken !== latestRenderToken) return;
@@ -793,9 +807,11 @@ async function processInput() {
   } catch (error) {
     if (renderToken !== latestRenderToken) return;
     currentData = null;
+    lastParseFailed = true;
     treeView.textContent = '解析失败，请检查内容格式';
     treeView.classList.add('empty');
     setStatus(error.message, 'error');
+    updateProcessInputButtonVisibility();
   }
 }
 
@@ -857,6 +873,10 @@ inputBox.addEventListener('blur', () => {
 
 inputBox.addEventListener('input', () => {
   saveInputDraft(inputBox.value);
+  if (!inputBox.value.trim()) {
+    lastParseFailed = false;
+  }
+  updateProcessInputButtonVisibility();
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(processInput, 220);
 });
@@ -865,6 +885,7 @@ clearBtn.addEventListener('click', () => {
   inputBox.value = '';
   saveInputDraft('');
   currentData = null;
+  lastParseFailed = false;
   selectedTreeMeta = null;
   selectedTreeRow = null;
   selectedPathKey = '';
@@ -876,6 +897,11 @@ clearBtn.addEventListener('click', () => {
   treeView.classList.add('empty');
   setStatus('内容已清空', 'muted');
   updateTreeActionButtons();
+  updateProcessInputButtonVisibility();
+});
+
+processInputBtn.addEventListener('click', () => {
+  applyUnescapeToWholeInput();
 });
 
 fullscreenBtn.addEventListener('click', () => {
@@ -932,6 +958,7 @@ updateTreeActionButtons();
 const savedInput = localStorage.getItem(INPUT_STORAGE_KEY);
 if (savedInput) {
   inputBox.value = savedInput;
+  updateProcessInputButtonVisibility();
   processInput();
 }
 
