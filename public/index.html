@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>JSON / Python Dict 查看器</title>
+  <title>只做JSON格式化</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -13,6 +13,7 @@
       <div class="viewer-column">
         <div class="panel-head actions-right">
           <div class="toolbar">
+            <button id="themeToggleBtn" class="ghost">夜晚模式</button>
             <button id="clearBtn">清除</button>
             <button id="collapseAllBtn" class="secondary">全部收起</button>
           </div>
@@ -22,11 +23,26 @@
       </div>
 
       <div class="viewer-column">
-        <div id="treeView" class="tree-view empty">粘贴后会自动解析并显示在这里</div>
+        <div id="treePanel" class="result-panel">
+          <div class="panel-head actions-right result-panel-head">
+            <div class="toolbar">
+              <input id="treeSearchInput" class="toolbar-input" type="text" placeholder="搜索 key / value" />
+              <button id="searchPrevBtn" class="ghost">上一个</button>
+              <button id="searchNextBtn" class="ghost">下一个</button>
+              <button id="copyValueBtn" class="ghost">复制值</button>
+              <button id="copyNodeBtn" class="ghost">复制节点</button>
+              <button id="fullscreenBtn" class="ghost">全屏查看</button>
+              <button id="fullscreenCloseBtn" class="ghost fullscreen-close-btn">× 退出全屏</button>
+            </div>
+          </div>
+          <div id="treeView" class="tree-view empty">粘贴后会自动解析并显示在这里</div>
+        </div>
       </div>
     </section>
   </main>
 
+  <div id="fullscreenBackdrop" class="fullscreen-backdrop"></div>
+  <div id="fullscreenHost" class="fullscreen-host"></div>
   <div id="contextMenu" class="context-menu hidden">
     <button id="contextUnescapeBtn" class="context-menu-btn">处理选中文本</button>
   </div>

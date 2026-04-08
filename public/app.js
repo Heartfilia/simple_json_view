@@ -1,8 +1,19 @@
 const inputBox = document.getElementById('inputBox');
 const treeView = document.getElementById('treeView');
+const treePanel = document.getElementById('treePanel');
 const statusBar = document.getElementById('statusBar');
+const themeToggleBtn = document.getElementById('themeToggleBtn');
+const treeSearchInput = document.getElementById('treeSearchInput');
+const searchPrevBtn = document.getElementById('searchPrevBtn');
+const searchNextBtn = document.getElementById('searchNextBtn');
+const copyValueBtn = document.getElementById('copyValueBtn');
+const copyNodeBtn = document.getElementById('copyNodeBtn');
 const clearBtn = document.getElementById('clearBtn');
 const collapseAllBtn = document.getElementById('collapseAllBtn');
+const fullscreenBtn = document.getElementById('fullscreenBtn');
+const fullscreenCloseBtn = document.getElementById('fullscreenCloseBtn');
+const fullscreenBackdrop = document.getElementById('fullscreenBackdrop');
+const fullscreenHost = document.getElementById('fullscreenHost');
 const contextMenu = document.getElementById('contextMenu');
 const contextUnescapeBtn = document.getElementById('contextUnescapeBtn');
 
@@ -16,6 +27,17 @@ let latestRenderToken = 0;
 let latestParseToken = 0;
 let parseWorker = null;
 const pendingWorkerJobs = new Map();
+let treePanelPlaceholder = null;
+let isTreeFullscreen = false;
+let isTreeFullscreenAnimating = false;
+const THEME_STORAGE_KEY = 'json-pretty-web-theme';
+const INPUT_STORAGE_KEY = 'json-pretty-web-input';
+let selectedTreeMeta = null;
+let selectedTreeRow = null;
+let searchResults = [];
+let searchResultIndex = -1;
+let searchKeyword = '';
+let treeNodeRegistry = new Map();
 
 function nextFrame() {
   return new Promise((resolve) => {
@@ -30,6 +52,73 @@ function nextFrame() {
 function setStatus(message, type = 'muted') {
   statusBar.textContent = message;
   statusBar.className = `status ${type}`;
+}
+
+function updateTreeActionButtons() {
+  const disabled = !selectedTreeMeta;
+  copyValueBtn.disabled = disabled;
+  copyNodeBtn.disabled = disabled;
+  const hasResults = searchResults.length > 0;
+  searchPrevBtn.disabled = !hasResults;
+  searchNextBtn.disabled = !hasResults;
+}
+
+function getCurrentTheme() {
+  return document.body.classList.contains('theme-mono') ? 'mono' : 'color';
+}
+
+function updateThemeButtonLabel() {
+  themeToggleBtn.textContent = getCurrentTheme() === 'mono' ? '白天模式' : '夜晚模式';
+}
+
+function applyTheme(theme, persist = true) {
+  document.body.classList.toggle('theme-mono', theme === 'mono');
+  updateThemeButtonLabel();
+  if (persist) {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }
+}
+
+function saveInputDraft(value) {
+  localStorage.setItem(INPUT_STORAGE_KEY, value);
+}
+
+function pathToKey(path) {
+  return JSON.stringify(path);
+}
+
+function serializeValue(value) {
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value, null, 2);
+}
+
+function serializeNode(meta) {
+  if (!meta) return '';
+  if (meta.key === null) return serializeValue(meta.value);
+  return JSON.stringify({ [meta.key]: meta.value }, null, 2);
+}
+
+async function copyText(text, successMessage) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const temp = document.createElement('textarea');
+      temp.value = text;
+      document.body.appendChild(temp);
+      temp.select();
+      document.execCommand('copy');
+      temp.remove();
+    }
+    setStatus(successMessage, 'success');
+  } catch {
+    setStatus('复制失败，请检查浏览器权限', 'error');
+  }
+}
+
+function updateFullscreenButtonLabel() {
+  fullscreenBtn.textContent = isTreeFullscreen ? '全屏已开启' : '全屏查看';
+  fullscreenBtn.disabled = isTreeFullscreen;
 }
 
 function escapeHtml(value) {
@@ -272,6 +361,154 @@ function showContextMenu(x, y) {
   contextMenu.classList.remove('hidden');
 }
 
+function waitForPanelTransition() {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 220);
+  });
+}
+
+async function enterTreeFullscreen() {
+  if (isTreeFullscreen || isTreeFullscreenAnimating) return;
+  if (!currentData) {
+    setStatus('请先粘贴并完成解析', 'error');
+    return;
+  }
+
+  isTreeFullscreenAnimating = true;
+  treePanelPlaceholder = document.createElement('div');
+  treePanelPlaceholder.className = 'result-panel-placeholder';
+  treePanelPlaceholder.style.width = `${treePanel.offsetWidth}px`;
+  treePanelPlaceholder.style.height = `${treePanel.offsetHeight}px`;
+  treePanel.after(treePanelPlaceholder);
+  fullscreenHost.appendChild(treePanel);
+  fullscreenBackdrop.classList.add('active');
+  fullscreenHost.classList.add('active');
+  document.body.classList.add('has-fullscreen-panel');
+  await waitForPanelTransition();
+  isTreeFullscreenAnimating = false;
+  isTreeFullscreen = true;
+  updateFullscreenButtonLabel();
+  setStatus('已进入全屏，按 Esc 可退出', 'success');
+}
+
+async function exitTreeFullscreen() {
+  if (!isTreeFullscreen || isTreeFullscreenAnimating || !treePanelPlaceholder) return;
+
+  isTreeFullscreenAnimating = true;
+  fullscreenBackdrop.classList.remove('active');
+  fullscreenHost.classList.remove('active');
+  await waitForPanelTransition();
+  treePanelPlaceholder.after(treePanel);
+  document.body.classList.remove('has-fullscreen-panel');
+  treePanelPlaceholder.remove();
+  treePanelPlaceholder = null;
+
+  isTreeFullscreenAnimating = false;
+  isTreeFullscreen = false;
+  updateFullscreenButtonLabel();
+  setStatus('已退出全屏', 'success');
+}
+
+function toggleTreeFullscreen() {
+  if (isTreeFullscreen) {
+    exitTreeFullscreen();
+    return;
+  }
+  enterTreeFullscreen();
+}
+
+function syncFullscreenPanelToViewport() {
+  return;
+}
+
+function setSelectedTreeRow(row, meta) {
+  if (selectedTreeRow) {
+    selectedTreeRow.classList.remove('selected');
+  }
+  selectedTreeRow = row;
+  selectedTreeMeta = meta;
+  if (selectedTreeRow) {
+    selectedTreeRow.classList.add('selected');
+  }
+  updateTreeActionButtons();
+}
+
+function buildSearchMatches(value, keyword, path = [], key = null, matches = []) {
+  const lowerKeyword = keyword.toLowerCase();
+  const selfText = [
+    key === null ? '' : String(key),
+    typeof value === 'object' && value !== null ? '' : String(value)
+  ].join(' ').toLowerCase();
+
+  if (selfText.includes(lowerKeyword)) {
+    matches.push(path);
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => buildSearchMatches(item, keyword, [...path, index], index, matches));
+    return matches;
+  }
+
+  if (value && typeof value === 'object') {
+    Object.entries(value).forEach(([childKey, childValue]) => {
+      buildSearchMatches(childValue, keyword, [...path, childKey], childKey, matches);
+    });
+  }
+
+  return matches;
+}
+
+function revealPath(path) {
+  for (let i = 0; i < path.length; i += 1) {
+    const ancestorKey = pathToKey(path.slice(0, i));
+    const childKey = pathToKey(path.slice(0, i + 1));
+    const ancestorNode = treeNodeRegistry.get(ancestorKey);
+    if (!ancestorNode) continue;
+    const children = ancestorNode.querySelector(':scope > .tree-children');
+    if (children?.classList.contains('collapsed')) {
+      const row = ancestorNode.querySelector(':scope > .tree-row');
+      row?.click();
+    }
+  }
+  return treeNodeRegistry.get(pathToKey(path)) || null;
+}
+
+function focusSearchResult(index) {
+  if (!searchResults.length) return;
+  searchResultIndex = (index + searchResults.length) % searchResults.length;
+  treeView.querySelectorAll('.tree-row.search-hit').forEach((row) => row.classList.remove('search-hit'));
+
+  const path = searchResults[searchResultIndex];
+  const node = revealPath(path);
+  const row = node?.querySelector(':scope > .tree-row');
+  if (!row) return;
+  row.classList.add('search-hit');
+  setSelectedTreeRow(row, row._treeMeta);
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  setStatus(`搜索结果 ${searchResultIndex + 1} / ${searchResults.length}`, 'success');
+}
+
+function runTreeSearch() {
+  const keyword = treeSearchInput.value.trim();
+  searchKeyword = keyword;
+  searchResults = [];
+  searchResultIndex = -1;
+  treeView.querySelectorAll('.tree-row.search-hit').forEach((row) => row.classList.remove('search-hit'));
+
+  if (!keyword || !currentData) {
+    updateTreeActionButtons();
+    return;
+  }
+
+  searchResults = buildSearchMatches(currentData, keyword);
+  updateTreeActionButtons();
+  if (!searchResults.length) {
+    setStatus('未找到匹配内容', 'error');
+    return;
+  }
+  focusSearchResult(0);
+}
+
 function renderValue(value) {
   if (typeof value === 'string') {
     return `<span class="tree-string">"${escapeHtml(value)}"</span>`;
@@ -293,13 +530,16 @@ function renderValue(value) {
   return `<span class="tree-meta">{Object(${Object.keys(value).length})}</span>`;
 }
 
-function createTreeNodeShell(value, key = null, level = 0) {
+function createTreeNodeShell(value, key = null, level = 0, path = []) {
   const node = document.createElement('div');
   node.className = 'tree-node';
   node.dataset.level = String(level);
+  node.dataset.pathKey = pathToKey(path);
+  treeNodeRegistry.set(node.dataset.pathKey, node);
 
   const row = document.createElement('div');
   row.className = 'tree-row';
+  row._treeMeta = { key, value, path };
 
   const isContainer = value && typeof value === 'object';
   const toggle = document.createElement('span');
@@ -342,7 +582,7 @@ function createTreeNodeShell(value, key = null, level = 0) {
 
     const fragment = document.createDocumentFragment();
     entries.forEach(([childKey, childValue]) => {
-      const childShell = createTreeNodeShell(childValue, childKey, level + 1);
+      const childShell = createTreeNodeShell(childValue, childKey, level + 1, [...path, childKey]);
       fragment.appendChild(childShell.node);
     });
 
@@ -366,7 +606,12 @@ function createTreeNodeShell(value, key = null, level = 0) {
     event.stopPropagation();
     toggleNode();
   });
-  row.addEventListener('click', () => toggleNode());
+  row.addEventListener('click', () => {
+    setSelectedTreeRow(row, row._treeMeta);
+    if (isContainer) {
+      toggleNode();
+    }
+  });
 
   node.appendChild(children);
   return {
@@ -380,11 +625,15 @@ function buildTree(value, key = null, level = 0) {
 }
 
 async function renderTreeAsync(data, renderToken) {
+  treeNodeRegistry = new Map();
+  selectedTreeMeta = null;
+  selectedTreeRow = null;
   treeView.innerHTML = '';
   treeView.classList.remove('empty');
 
   const rootShell = createTreeNodeShell(data);
   treeView.appendChild(rootShell.node);
+  setSelectedTreeRow(rootShell.node.querySelector(':scope > .tree-row'), rootShell.node.querySelector(':scope > .tree-row')._treeMeta);
 
   const queue = [];
   const rootChildren = rootShell.node.querySelector(':scope > .tree-children');
@@ -454,6 +703,11 @@ async function processInput() {
     };
 
     await startRender();
+    if (searchKeyword) {
+      runTreeSearch();
+    } else {
+      updateTreeActionButtons();
+    }
   } catch (error) {
     if (renderToken !== latestRenderToken) return;
     currentData = null;
@@ -488,24 +742,85 @@ document.addEventListener('click', (event) => {
   }
 });
 
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && isTreeFullscreen) {
+    event.preventDefault();
+    exitTreeFullscreen();
+  }
+});
+
 document.addEventListener('scroll', hideContextMenu, true);
-window.addEventListener('resize', hideContextMenu);
+window.addEventListener('resize', () => {
+  hideContextMenu();
+  syncFullscreenPanelToViewport();
+});
 inputBox.addEventListener('blur', () => {
   setTimeout(hideContextMenu, 120);
 });
 
 inputBox.addEventListener('input', () => {
+  saveInputDraft(inputBox.value);
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(processInput, 220);
 });
 
 clearBtn.addEventListener('click', () => {
   inputBox.value = '';
+  saveInputDraft('');
   currentData = null;
+  searchResults = [];
+  searchResultIndex = -1;
+  searchKeyword = '';
+  treeSearchInput.value = '';
   treeView.textContent = '粘贴后会自动解析并显示在这里';
   treeView.classList.add('empty');
   setStatus('内容已清空', 'muted');
+  updateTreeActionButtons();
 });
+
+fullscreenBtn.addEventListener('click', () => {
+  toggleTreeFullscreen();
+});
+
+fullscreenCloseBtn.addEventListener('click', () => {
+  exitTreeFullscreen();
+});
+
+themeToggleBtn.addEventListener('click', () => {
+  applyTheme(getCurrentTheme() === 'mono' ? 'color' : 'mono');
+});
+
+treeSearchInput.addEventListener('input', () => {
+  runTreeSearch();
+});
+
+searchPrevBtn.addEventListener('click', () => {
+  focusSearchResult(searchResultIndex - 1);
+});
+
+searchNextBtn.addEventListener('click', () => {
+  focusSearchResult(searchResultIndex + 1);
+});
+
+copyValueBtn.addEventListener('click', () => {
+  if (!selectedTreeMeta) return;
+  copyText(serializeValue(selectedTreeMeta.value), '已复制当前值');
+});
+
+copyNodeBtn.addEventListener('click', () => {
+  if (!selectedTreeMeta) return;
+  copyText(serializeNode(selectedTreeMeta), '已复制当前节点');
+});
+
+updateFullscreenButtonLabel();
+applyTheme(localStorage.getItem(THEME_STORAGE_KEY) === 'mono' ? 'mono' : 'color', false);
+updateTreeActionButtons();
+
+const savedInput = localStorage.getItem(INPUT_STORAGE_KEY);
+if (savedInput) {
+  inputBox.value = savedInput;
+  processInput();
+}
 
 collapseAllBtn.addEventListener('click', () => {
   if (!currentData) {
