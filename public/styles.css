@@ -22,6 +22,9 @@
   --ghost-bg: transparent;
   --backdrop: rgba(15, 23, 42, 0.1);
   --close-bg: rgba(255, 255, 255, 0.92);
+  --menu-bg: rgba(255, 255, 255, 0.98);
+  --menu-border: rgba(15, 23, 42, 0.12);
+  --menu-hover: rgba(37, 99, 235, 0.08);
 }
 
 * { box-sizing: border-box; }
@@ -59,6 +62,9 @@ body.theme-mono {
   --ghost-bg: transparent;
   --backdrop: rgba(5, 9, 20, 0.18);
   --close-bg: rgba(12, 18, 34, 0.92);
+  --menu-bg: rgba(10, 15, 30, 0.96);
+  --menu-border: rgba(255,255,255,0.12);
+  --menu-hover: rgba(124, 156, 255, 0.14);
 }
 
 .bg {
@@ -69,7 +75,7 @@ body.theme-mono {
 }
 
 .app-shell {
-  width: min(1280px, calc(100% - 24px));
+  width: min(1680px, calc(100% - clamp(16px, 2vw, 32px)));
   height: calc(100vh - 24px);
   margin: 12px auto;
   position: relative;
@@ -128,16 +134,22 @@ body.theme-mono {
   gap: 16px;
   margin-bottom: 14px;
   flex: 0 0 auto;
+  min-height: 42px;
 }
 
 .actions-right {
   justify-content: flex-end;
 }
 
+.panel-head-split {
+  justify-content: space-between;
+}
+
 .toolbar {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .toolbar-input {
@@ -182,6 +194,14 @@ textarea {
   flex: 0 0 auto;
 }
 
+.status-inline {
+  margin-top: 0;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
 .muted { color: var(--muted); }
 .success { color: var(--accent-2); }
 .error { color: var(--danger); }
@@ -189,12 +209,17 @@ textarea {
 button {
   border: none;
   border-radius: 12px;
-  padding: 10px 16px;
+  min-height: 42px;
+  padding: 0 16px;
   font-weight: 600;
   cursor: pointer;
   color: var(--button-text);
   background: linear-gradient(135deg, #7c9cff, #78e8c8);
   transition: transform .18s ease, opacity .18s ease, box-shadow .18s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
 }
 
 button:disabled {
@@ -238,15 +263,17 @@ button.ghost {
   position: fixed;
   inset: 0;
   z-index: 1100;
-  display: none;
   padding: 0;
   opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
   transition: opacity .2s ease-out;
 }
 
 .fullscreen-host.active {
-  display: block;
   opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .fullscreen-host.active .result-panel {
@@ -266,34 +293,32 @@ button.ghost {
   top: 0;
   z-index: 2;
   margin-top: 0;
-  margin-bottom: 8px;
-  padding: 12px 14px 8px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--panel-bg) 96%, transparent), color-mix(in srgb, var(--panel-bg) 72%, transparent), transparent);
+  margin-bottom: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  background: color-mix(in srgb, var(--panel-bg) 96%, transparent);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 }
 
 .fullscreen-host.active .tree-view {
-  padding: 12px 14px 18px;
+  padding: 14px 14px 18px;
   border-radius: 0;
   border-left: none;
   border-right: none;
   border-bottom: none;
+  border-top: none;
 }
 
 .fullscreen-host.active .fullscreen-close-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 104px;
-  padding: 10px 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,0.14);
-  background: var(--close-bg);
-  color: var(--text);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
+  min-width: unset;
 }
 
 .fullscreen-host.active .result-panel-head .toolbar {
-  gap: 8px;
+  gap: 10px;
   width: 100%;
   align-items: center;
   justify-content: flex-start;
@@ -302,19 +327,23 @@ button.ghost {
 
 .fullscreen-host.active .result-panel-head button,
 .fullscreen-host.active .result-panel-head .toolbar-input {
-  height: 38px;
+  height: 40px;
   padding-top: 0;
   padding-bottom: 0;
 }
 
 .fullscreen-host.active .toolbar-input {
-  flex: 1 1 220px;
-  min-width: 160px;
+  flex: 1 1 280px;
+  min-width: 220px;
 }
 
 .fullscreen-host.active .fullscreen-close-btn {
   margin-left: 0;
   order: 99;
+}
+
+.fullscreen-host.active .result-panel-head button {
+  border-radius: 10px;
 }
 
 .fullscreen-host.active #fullscreenBtn {
@@ -405,8 +434,8 @@ body.has-fullscreen-panel {
   min-width: 180px;
   padding: 8px;
   border-radius: 14px;
-  border: 1px solid rgba(255,255,255,0.12);
-  background: rgba(10, 15, 30, 0.96);
+  border: 1px solid var(--menu-border);
+  background: var(--menu-bg);
   box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(16px);
 }
@@ -428,7 +457,7 @@ body.has-fullscreen-panel {
 }
 
 .context-menu-btn:hover {
-  background: rgba(124, 156, 255, 0.14);
+  background: var(--menu-hover);
   box-shadow: none;
   transform: none;
 }

@@ -15,6 +15,9 @@ const fullscreenCloseBtn = document.getElementById('fullscreenCloseBtn');
 const fullscreenBackdrop = document.getElementById('fullscreenBackdrop');
 const fullscreenHost = document.getElementById('fullscreenHost');
 const contextMenu = document.getElementById('contextMenu');
+const contextCopyPathBtn = document.getElementById('contextCopyPathBtn');
+const contextCopyValueBtn = document.getElementById('contextCopyValueBtn');
+const contextCopyNodeBtn = document.getElementById('contextCopyNodeBtn');
 const contextUnescapeBtn = document.getElementById('contextUnescapeBtn');
 
 let currentData = null;
@@ -38,6 +41,10 @@ let searchResults = [];
 let searchResultIndex = -1;
 let searchKeyword = '';
 let treeNodeRegistry = new Map();
+let contextTreeMeta = null;
+let copyPathBtn = null;
+let selectedPathKey = '';
+let contextMenuMode = 'input';
 
 function nextFrame() {
   return new Promise((resolve) => {
@@ -58,6 +65,7 @@ function updateTreeActionButtons() {
   const disabled = !selectedTreeMeta;
   copyValueBtn.disabled = disabled;
   copyNodeBtn.disabled = disabled;
+  if (copyPathBtn) copyPathBtn.disabled = disabled;
   const hasResults = searchResults.length > 0;
   searchPrevBtn.disabled = !hasResults;
   searchNextBtn.disabled = !hasResults;
@@ -85,6 +93,23 @@ function saveInputDraft(value) {
 
 function pathToKey(path) {
   return JSON.stringify(path);
+}
+
+function formatPath(path) {
+  if (!Array.isArray(path) || path.length === 0) return 'root';
+  return path.reduce((acc, segment, index) => {
+    if (typeof segment === 'number') {
+      return `${acc}[${segment}]`;
+    }
+
+    const safeSegment = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(String(segment))
+      ? String(segment)
+      : `["${String(segment).replace(/"/g, '\\"')}"]`;
+
+    if (index === 0) return safeSegment;
+    if (safeSegment.startsWith('["')) return `${acc}${safeSegment}`;
+    return `${acc}.${safeSegment}`;
+  }, '');
 }
 
 function serializeValue(value) {
@@ -138,6 +163,22 @@ function decodeEscapedJsonString(raw) {
   }
 
   return text.replace(/\\"/g, '"');
+}
+
+function decodeWholeInputText(raw) {
+  let text = raw.trim();
+  if (!text) return raw;
+
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    text = text.slice(1, -1);
+  }
+
+  return text
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
 }
 
 function normalizePythonLike(input) {
@@ -347,18 +388,40 @@ function applyUnescapeToSelection() {
   return true;
 }
 
+function applyUnescapeToWholeInput() {
+  if (!inputBox.value.trim()) {
+    setStatus('请先粘贴要处理的内容', 'error');
+    return false;
+  }
+
+  inputBox.value = decodeWholeInputText(inputBox.value);
+  saveInputDraft(inputBox.value);
+  processInput();
+  setStatus('已处理输入框内容', 'success');
+  return true;
+}
+
 function hideContextMenu() {
   contextMenu.classList.add('hidden');
 }
 
 function showContextMenu(x, y) {
   const menuWidth = 200;
-  const menuHeight = 52;
+  const menuHeight = 176;
   const left = Math.min(x, window.innerWidth - menuWidth - 12);
   const top = Math.min(y, window.innerHeight - menuHeight - 12);
   contextMenu.style.left = `${Math.max(12, left)}px`;
   contextMenu.style.top = `${Math.max(12, top)}px`;
   contextMenu.classList.remove('hidden');
+}
+
+function setContextMenuMode(mode) {
+  contextMenuMode = mode;
+  const isInput = mode === 'input';
+  contextCopyPathBtn.style.display = isInput ? 'none' : '';
+  contextCopyValueBtn.style.display = isInput ? 'none' : '';
+  contextCopyNodeBtn.style.display = isInput ? 'none' : '';
+  contextUnescapeBtn.style.display = isInput ? '' : 'none';
 }
 
 function waitForPanelTransition() {
@@ -395,10 +458,11 @@ async function exitTreeFullscreen() {
   if (!isTreeFullscreen || isTreeFullscreenAnimating || !treePanelPlaceholder) return;
 
   isTreeFullscreenAnimating = true;
+  treePanelPlaceholder.after(treePanel);
+  await nextFrame();
   fullscreenBackdrop.classList.remove('active');
   fullscreenHost.classList.remove('active');
   await waitForPanelTransition();
-  treePanelPlaceholder.after(treePanel);
   document.body.classList.remove('has-fullscreen-panel');
   treePanelPlaceholder.remove();
   treePanelPlaceholder = null;
@@ -427,10 +491,19 @@ function setSelectedTreeRow(row, meta) {
   }
   selectedTreeRow = row;
   selectedTreeMeta = meta;
+  selectedPathKey = meta ? pathToKey(meta.path) : '';
   if (selectedTreeRow) {
     selectedTreeRow.classList.add('selected');
   }
   updateTreeActionButtons();
+}
+
+function openTreeContextMenu(event, meta, row) {
+  event.preventDefault();
+  setSelectedTreeRow(row, meta);
+  contextTreeMeta = meta;
+  setContextMenuMode('tree');
+  showContextMenu(event.clientX, event.clientY);
 }
 
 function buildSearchMatches(value, keyword, path = [], key = null, matches = []) {
@@ -604,7 +677,14 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
 
   toggle.addEventListener('click', (event) => {
     event.stopPropagation();
+    setSelectedTreeRow(row, row._treeMeta);
     toggleNode();
+  });
+  row.addEventListener('pointerdown', () => {
+    setSelectedTreeRow(row, row._treeMeta);
+  });
+  row.addEventListener('contextmenu', (event) => {
+    openTreeContextMenu(event, row._treeMeta, row);
   });
   row.addEventListener('click', () => {
     setSelectedTreeRow(row, row._treeMeta);
@@ -633,7 +713,9 @@ async function renderTreeAsync(data, renderToken) {
 
   const rootShell = createTreeNodeShell(data);
   treeView.appendChild(rootShell.node);
-  setSelectedTreeRow(rootShell.node.querySelector(':scope > .tree-row'), rootShell.node.querySelector(':scope > .tree-row')._treeMeta);
+  const preferredNode = treeNodeRegistry.get(selectedPathKey) || rootShell.node;
+  const preferredRow = preferredNode.querySelector(':scope > .tree-row');
+  setSelectedTreeRow(preferredRow, preferredRow._treeMeta);
 
   const queue = [];
   const rootChildren = rootShell.node.querySelector(':scope > .tree-children');
@@ -718,27 +800,42 @@ async function processInput() {
 }
 
 inputBox.addEventListener('contextmenu', (event) => {
-  const start = inputBox.selectionStart;
-  const end = inputBox.selectionEnd;
-  const hasSelection = Number.isInteger(start) && Number.isInteger(end) && end > start;
-
-  if (!hasSelection) {
-    hideContextMenu();
-    return;
-  }
-
   event.preventDefault();
+  setContextMenuMode('input');
   showContextMenu(event.clientX, event.clientY);
 });
 
+contextCopyPathBtn.addEventListener('click', () => {
+  if (!contextTreeMeta && !selectedTreeMeta) return;
+  copyText(formatPath((contextTreeMeta || selectedTreeMeta).path), '已复制当前路径');
+  hideContextMenu();
+});
+
+contextCopyValueBtn.addEventListener('click', () => {
+  if (!contextTreeMeta && !selectedTreeMeta) return;
+  copyText(serializeValue((contextTreeMeta || selectedTreeMeta).value), '已复制当前值');
+  hideContextMenu();
+});
+
+contextCopyNodeBtn.addEventListener('click', () => {
+  if (!contextTreeMeta && !selectedTreeMeta) return;
+  copyText(serializeNode(contextTreeMeta || selectedTreeMeta), '已复制当前节点');
+  hideContextMenu();
+});
+
 contextUnescapeBtn.addEventListener('click', () => {
-  applyUnescapeToSelection();
+  if (contextMenuMode === 'input') {
+    applyUnescapeToWholeInput();
+  } else {
+    applyUnescapeToSelection();
+  }
   hideContextMenu();
 });
 
 document.addEventListener('click', (event) => {
   if (!contextMenu.contains(event.target)) {
     hideContextMenu();
+    contextTreeMeta = null;
   }
 });
 
@@ -768,6 +865,9 @@ clearBtn.addEventListener('click', () => {
   inputBox.value = '';
   saveInputDraft('');
   currentData = null;
+  selectedTreeMeta = null;
+  selectedTreeRow = null;
+  selectedPathKey = '';
   searchResults = [];
   searchResultIndex = -1;
   searchKeyword = '';
@@ -811,6 +911,19 @@ copyNodeBtn.addEventListener('click', () => {
   if (!selectedTreeMeta) return;
   copyText(serializeNode(selectedTreeMeta), '已复制当前节点');
 });
+
+copyPathBtn = (() => {
+  const btn = document.createElement('button');
+  btn.id = 'copyPathBtn';
+  btn.className = 'ghost';
+  btn.textContent = '复制路径';
+  btn.addEventListener('click', () => {
+    if (!selectedTreeMeta) return;
+    copyText(formatPath(selectedTreeMeta.path), '已复制当前路径');
+  });
+  return btn;
+})();
+copyValueBtn.insertAdjacentElement('afterend', copyPathBtn);
 
 updateFullscreenButtonLabel();
 applyTheme(localStorage.getItem(THEME_STORAGE_KEY) === 'mono' ? 'mono' : 'color', false);
