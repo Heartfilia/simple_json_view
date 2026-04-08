@@ -60,7 +60,7 @@ function nextFrame() {
 
 function setStatus(message, type = 'muted') {
   statusBar.textContent = message;
-  statusBar.className = `status ${type}`;
+  statusBar.className = `status status-inline ${type}`;
 }
 
 function updateProcessInputButtonVisibility() {

@@ -135,6 +135,7 @@ body.theme-mono {
   margin-bottom: 14px;
   flex: 0 0 auto;
   min-height: 42px;
+  min-width: 0;
 }
 
 .actions-right {
@@ -150,6 +151,7 @@ body.theme-mono {
   gap: 10px;
   flex-wrap: wrap;
   align-items: center;
+  min-width: 0;
 }
 
 .hidden-action {
@@ -167,6 +169,7 @@ body.theme-mono {
 }
 
 .toolbar-input {
+  flex: 1 1 180px;
   min-width: 180px;
   height: 42px;
   padding: 0 14px;
@@ -211,9 +214,14 @@ textarea {
 .status-inline {
   margin-top: 0;
   min-height: 42px;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  line-height: 1;
+  line-height: 1.5;
+  flex: 1 1 240px;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .muted { color: var(--muted); }
@@ -439,6 +447,42 @@ body.has-fullscreen-panel {
     min-height: 900px;
   }
   .actions-right { justify-content: flex-start; }
+}
+
+@media (max-width: 720px) {
+  .panel-head,
+  .panel-head-split,
+  .result-panel-head {
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .panel-head-split {
+    flex-direction: column;
+  }
+
+  .status-inline {
+    width: 100%;
+    min-height: unset;
+  }
+
+  .primary-toolbar,
+  .result-toolbar {
+    width: 100%;
+  }
+
+  .primary-toolbar > button,
+  .result-toolbar > button {
+    flex: 1 1 calc(50% - 5px);
+    min-width: 0;
+    white-space: normal;
+    text-align: center;
+  }
+
+  .result-toolbar > .toolbar-input {
+    flex-basis: 100%;
+    min-width: 0;
+  }
 }
 
 
