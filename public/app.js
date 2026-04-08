@@ -639,6 +639,13 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
   row.appendChild(content);
   node.appendChild(row);
 
+  row.addEventListener('pointerdown', () => {
+    setSelectedTreeRow(row, row._treeMeta);
+  });
+  row.addEventListener('contextmenu', (event) => {
+    openTreeContextMenu(event, row._treeMeta, row);
+  });
+
   if (!isContainer) {
     return {
       node,
@@ -689,12 +696,6 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
     event.stopPropagation();
     setSelectedTreeRow(row, row._treeMeta);
     toggleNode();
-  });
-  row.addEventListener('pointerdown', () => {
-    setSelectedTreeRow(row, row._treeMeta);
-  });
-  row.addEventListener('contextmenu', (event) => {
-    openTreeContextMenu(event, row._treeMeta, row);
   });
   row.addEventListener('click', () => {
     setSelectedTreeRow(row, row._treeMeta);
