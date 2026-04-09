@@ -44,6 +44,7 @@ let debounceTimer = null;
 const AUTO_EXPAND_DEPTH = 1;
 const LARGE_INPUT_THRESHOLD = 50000;
 const FRAME_BUDGET_MS = 8;
+const CHILD_RENDER_BATCH_SIZE = 150;
 
 let latestRenderToken = 0;
 let latestParseToken = 0;
@@ -595,29 +596,26 @@ function buildSearchMatches(value, keyword, path = [], key = null, matches = [])
   return matches;
 }
 
-function revealPath(path) {
+async function revealPath(path) {
   for (let i = 0; i < path.length; i += 1) {
     const ancestorKey = pathToKey(path.slice(0, i));
-    const childKey = pathToKey(path.slice(0, i + 1));
     const ancestorNode = treeNodeRegistry.get(ancestorKey);
     if (!ancestorNode) continue;
-    const children = ancestorNode.querySelector(':scope > .tree-children');
-    if (children?.classList.contains('collapsed')) {
-      const row = ancestorNode.querySelector(':scope > .tree-row');
-      row?.click();
+    if (typeof ancestorNode._expandNode === 'function') {
+      await ancestorNode._expandNode();
     }
   }
   return treeNodeRegistry.get(pathToKey(path)) || null;
 }
 
-function focusSearchResult(index) {
+async function focusSearchResult(index) {
   if (!searchResults.length) return;
   searchResultIndex = (index + searchResults.length) % searchResults.length;
   updateTreeActionButtons();
   treeView.querySelectorAll('.tree-row.search-hit').forEach((row) => row.classList.remove('search-hit'));
 
   const path = searchResults[searchResultIndex];
-  const node = revealPath(path);
+  const node = await revealPath(path);
   const row = node?.querySelector(':scope > .tree-row');
   if (!row) return;
   row.classList.add('search-hit');
@@ -643,7 +641,7 @@ function runTreeSearch() {
     setStatus('未找到匹配内容', 'error');
     return;
   }
-  focusSearchResult(0);
+  void focusSearchResult(0);
 }
 
 function renderValue(value) {
@@ -711,50 +709,90 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
   children.className = 'tree-children';
   const shouldStartCollapsed = level >= AUTO_EXPAND_DEPTH;
   let hasRenderedChildren = false;
+  let isRenderingChildren = false;
+  let renderChildrenPromise = null;
 
   if (shouldStartCollapsed) {
     children.classList.add('collapsed');
     toggle.textContent = '▸';
   }
 
-  const ensureChildrenRendered = () => {
+  const ensureChildrenRendered = async () => {
     if (hasRenderedChildren) return;
+    if (renderChildrenPromise) {
+      await renderChildrenPromise;
+      return;
+    }
 
     const entries = Array.isArray(value)
       ? value.map((item, index) => [index, item])
       : Object.entries(value);
 
-    const fragment = document.createDocumentFragment();
-    entries.forEach(([childKey, childValue]) => {
-      const childShell = createTreeNodeShell(childValue, childKey, level + 1, [...path, childKey]);
-      fragment.appendChild(childShell.node);
-    });
+    isRenderingChildren = true;
+    row.classList.add('loading');
+    toggle.textContent = '…';
 
-    children.appendChild(fragment);
-    hasRenderedChildren = true;
+    renderChildrenPromise = (async () => {
+      for (let index = 0; index < entries.length; index += CHILD_RENDER_BATCH_SIZE) {
+        const fragment = document.createDocumentFragment();
+        const chunk = entries.slice(index, index + CHILD_RENDER_BATCH_SIZE);
+
+        chunk.forEach(([childKey, childValue]) => {
+          const childShell = createTreeNodeShell(childValue, childKey, level + 1, [...path, childKey]);
+          fragment.appendChild(childShell.node);
+        });
+
+        children.appendChild(fragment);
+        if (index + CHILD_RENDER_BATCH_SIZE < entries.length) {
+          await nextFrame();
+        }
+      }
+
+      hasRenderedChildren = true;
+    })();
+
+    try {
+      await renderChildrenPromise;
+    } finally {
+      isRenderingChildren = false;
+      renderChildrenPromise = null;
+      row.classList.remove('loading');
+      toggle.textContent = children.classList.contains('collapsed') ? '▸' : '▾';
+    }
   };
 
-  if (!shouldStartCollapsed) {
-    ensureChildrenRendered();
-  }
-
-  const toggleNode = () => {
-    if (children.classList.contains('collapsed')) {
-      ensureChildrenRendered();
+  const toggleNode = async () => {
+    const wasCollapsed = children.classList.contains('collapsed');
+    if (wasCollapsed) {
+      await ensureChildrenRendered();
     }
+    if (isRenderingChildren) return;
     const collapsed = children.classList.toggle('collapsed');
     toggle.textContent = collapsed ? '▸' : '▾';
   };
 
+  const expandNode = async () => {
+    if (!children.classList.contains('collapsed')) {
+      if (renderChildrenPromise) {
+        await renderChildrenPromise;
+      }
+      return;
+    }
+    await toggleNode();
+  };
+
+  node._expandNode = expandNode;
+  node._ensureChildrenRendered = ensureChildrenRendered;
+
   toggle.addEventListener('click', (event) => {
     event.stopPropagation();
     setSelectedTreeRow(row, row._treeMeta);
-    toggleNode();
+    void toggleNode();
   });
   row.addEventListener('click', () => {
     setSelectedTreeRow(row, row._treeMeta);
     if (isContainer) {
-      toggleNode();
+      void toggleNode();
     }
   });
 
@@ -782,30 +820,9 @@ async function renderTreeAsync(data, renderToken) {
   const preferredRow = preferredNode.querySelector(':scope > .tree-row');
   setSelectedTreeRow(preferredRow, preferredRow._treeMeta);
 
-  const queue = [];
-  const rootChildren = rootShell.node.querySelector(':scope > .tree-children');
-  if (rootChildren && !rootChildren.classList.contains('collapsed')) {
-    Array.from(rootChildren.children).forEach((child) => queue.push(child));
-  }
-
-  while (queue.length) {
+  if (typeof rootShell.node._ensureChildrenRendered === 'function') {
+    await rootShell.node._ensureChildrenRendered();
     if (renderToken !== latestRenderToken) return;
-
-    const frameStart = performance.now();
-    while (queue.length && performance.now() - frameStart < FRAME_BUDGET_MS) {
-      const currentNode = queue.shift();
-      const level = Number(currentNode.dataset.level || '0');
-      const children = currentNode.querySelector(':scope > .tree-children');
-      if (!children || level >= AUTO_EXPAND_DEPTH) continue;
-
-      Array.from(children.children).forEach((child) => {
-        queue.push(child);
-      });
-    }
-
-    if (queue.length) {
-      await nextFrame();
-    }
   }
 }
 
