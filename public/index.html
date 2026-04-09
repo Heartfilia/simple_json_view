@@ -2,6 +2,9 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="author" content="Heartfilia">
+  <meta name="copyright" content="Apache">
+  <meta name="description" content="只做一件事，那就是 干净，好用，易用">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>只做JSON格式化</title>
   <link rel="stylesheet" href="./styles.css" />
@@ -16,8 +19,9 @@
           <div class="toolbar primary-toolbar">
             <button id="processInputBtn" class="ghost hidden-action">处理输入内容</button>
             <button id="themeToggleBtn" class="ghost">夜晚模式</button>
+            <button id="compactBtn" class="secondary">压缩</button>
             <button id="clearBtn">清除</button>
-            <button id="collapseAllBtn" class="secondary">全部收起</button>
+            <button id="collapseAllBtn" class="secondary">收起</button>
           </div>
         </div>
         <textarea id="inputBox" spellcheck="false" placeholder="粘贴 JSON、Python 字典，或转义后的文本"></textarea>
@@ -27,13 +31,25 @@
         <div id="treePanel" class="result-panel">
           <div class="panel-head actions-right result-panel-head">
             <div class="toolbar result-toolbar">
-              <input id="treeSearchInput" class="toolbar-input" type="text" placeholder="搜索 key / value" />
-              <button id="searchPrevBtn" class="ghost">上一个</button>
-              <button id="searchNextBtn" class="ghost">下一个</button>
-              <button id="copyValueBtn" class="ghost">复制值</button>
-              <button id="copyNodeBtn" class="ghost">复制节点</button>
-              <button id="fullscreenBtn" class="ghost">全屏查看</button>
-              <button id="fullscreenCloseBtn" class="ghost fullscreen-close-btn">退出全屏</button>
+              <div class="search-field">
+                <input id="treeSearchInput" class="toolbar-input search-field-input" type="text" placeholder="搜索" />
+                <div class="search-nav" aria-label="搜索结果导航">
+                  <span id="searchResultCount" class="search-result-count" aria-live="polite"></span>
+                  <button id="searchPrevBtn" class="ghost search-nav-btn" type="button" aria-label="上一个结果" title="上一个结果">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <path d="M11.75 4.5L6.25 10l5.5 5.5" />
+                    </svg>
+                  </button>
+                  <button id="searchNextBtn" class="ghost search-nav-btn" type="button" aria-label="下一个结果" title="下一个结果">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <path d="M8.25 4.5L13.75 10l-5.5 5.5" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <button id="copyValueBtn" class="ghost toolbar-action-btn">复制值</button>
+              <button id="fullscreenBtn" class="ghost toolbar-action-btn">全屏</button>
+              <button id="fullscreenCloseBtn" class="ghost toolbar-action-btn fullscreen-close-btn">退出</button>
             </div>
           </div>
           <div id="treeView" class="tree-view empty">粘贴后会自动解析并显示在这里</div>
@@ -49,6 +65,7 @@
     <button id="contextCopyValueBtn" class="context-menu-btn">复制值</button>
     <button id="contextCopyNodeBtn" class="context-menu-btn">复制节点</button>
     <button id="contextUnescapeBtn" class="context-menu-btn">处理输入内容</button>
+    <button id="contextCompactBtn" class="context-menu-btn">压缩内容</button>
   </div>
 
   <script src="./app.js"></script>

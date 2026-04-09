@@ -4,11 +4,12 @@ const treePanel = document.getElementById('treePanel');
 const statusBar = document.getElementById('statusBar');
 const processInputBtn = document.getElementById('processInputBtn');
 const themeToggleBtn = document.getElementById('themeToggleBtn');
+const compactBtn = document.getElementById('compactBtn');
 const treeSearchInput = document.getElementById('treeSearchInput');
+const searchResultCount = document.getElementById('searchResultCount');
 const searchPrevBtn = document.getElementById('searchPrevBtn');
 const searchNextBtn = document.getElementById('searchNextBtn');
 const copyValueBtn = document.getElementById('copyValueBtn');
-const copyNodeBtn = document.getElementById('copyNodeBtn');
 const clearBtn = document.getElementById('clearBtn');
 const collapseAllBtn = document.getElementById('collapseAllBtn');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
@@ -20,6 +21,7 @@ const contextCopyPathBtn = document.getElementById('contextCopyPathBtn');
 const contextCopyValueBtn = document.getElementById('contextCopyValueBtn');
 const contextCopyNodeBtn = document.getElementById('contextCopyNodeBtn');
 const contextUnescapeBtn = document.getElementById('contextUnescapeBtn');
+const contextCompactBtn = document.getElementById('contextCompactBtn');
 
 let currentData = null;
 let debounceTimer = null;
@@ -43,7 +45,6 @@ let searchResultIndex = -1;
 let searchKeyword = '';
 let treeNodeRegistry = new Map();
 let contextTreeMeta = null;
-let copyPathBtn = null;
 let selectedPathKey = '';
 let contextMenuMode = 'input';
 let lastParseFailed = false;
@@ -64,19 +65,31 @@ function setStatus(message, type = 'muted') {
 }
 
 function updateProcessInputButtonVisibility() {
-  const shouldShow = Boolean(inputBox.value.trim()) && lastParseFailed;
+  const hasInput = Boolean(inputBox.value.trim());
+  const shouldShow = hasInput && lastParseFailed;
   processInputBtn.classList.toggle('visible', shouldShow);
   processInputBtn.classList.toggle('attention', shouldShow);
+  compactBtn.disabled = !hasInput;
+  clearBtn.disabled = !hasInput;
 }
 
 function updateTreeActionButtons() {
   const disabled = !selectedTreeMeta;
   copyValueBtn.disabled = disabled;
-  copyNodeBtn.disabled = disabled;
-  if (copyPathBtn) copyPathBtn.disabled = disabled;
-  const hasResults = searchResults.length > 0;
+  const hasSearchKeyword = Boolean(treeSearchInput.value.trim()) && Boolean(currentData);
+  const hasResults = hasSearchKeyword && searchResults.length > 0;
   searchPrevBtn.disabled = !hasResults;
   searchNextBtn.disabled = !hasResults;
+  if (searchResultCount) {
+    if (hasResults) {
+      const current = searchResultIndex >= 0 ? searchResultIndex + 1 : 1;
+      searchResultCount.textContent = `${current}/${searchResults.length}`;
+      searchResultCount.classList.add('visible');
+    } else {
+      searchResultCount.textContent = '';
+      searchResultCount.classList.remove('visible');
+    }
+  }
 }
 
 function getCurrentTheme() {
@@ -150,7 +163,7 @@ async function copyText(text, successMessage) {
 }
 
 function updateFullscreenButtonLabel() {
-  fullscreenBtn.textContent = isTreeFullscreen ? '全屏已开启' : '全屏查看';
+  fullscreenBtn.textContent = isTreeFullscreen ? '全屏中' : '全屏';
   fullscreenBtn.disabled = isTreeFullscreen;
 }
 
@@ -432,6 +445,7 @@ function setContextMenuMode(mode) {
   contextCopyValueBtn.style.display = isInput ? 'none' : '';
   contextCopyNodeBtn.style.display = isInput ? 'none' : '';
   contextUnescapeBtn.style.display = isInput ? '' : 'none';
+  contextCompactBtn.style.display = isInput ? '' : 'none';
 }
 
 function waitForPanelTransition() {
@@ -468,13 +482,12 @@ async function exitTreeFullscreen() {
   if (!isTreeFullscreen || isTreeFullscreenAnimating || !treePanelPlaceholder) return;
 
   isTreeFullscreenAnimating = true;
-  treePanelPlaceholder.after(treePanel);
+  treePanelPlaceholder.replaceWith(treePanel);
   await nextFrame();
   fullscreenBackdrop.classList.remove('active');
   fullscreenHost.classList.remove('active');
   await waitForPanelTransition();
   document.body.classList.remove('has-fullscreen-panel');
-  treePanelPlaceholder.remove();
   treePanelPlaceholder = null;
 
   isTreeFullscreenAnimating = false;
@@ -559,6 +572,7 @@ function revealPath(path) {
 function focusSearchResult(index) {
   if (!searchResults.length) return;
   searchResultIndex = (index + searchResults.length) % searchResults.length;
+  updateTreeActionButtons();
   treeView.querySelectorAll('.tree-row.search-hit').forEach((row) => row.classList.remove('search-hit'));
 
   const path = searchResults[searchResultIndex];
@@ -568,7 +582,6 @@ function focusSearchResult(index) {
   row.classList.add('search-hit');
   setSelectedTreeRow(row, row._treeMeta);
   row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  setStatus(`搜索结果 ${searchResultIndex + 1} / ${searchResults.length}`, 'success');
 }
 
 function runTreeSearch() {
@@ -764,6 +777,33 @@ function setAllCollapsed(collapsed) {
   });
 }
 
+async function compactInputContent() {
+  const raw = inputBox.value.trim();
+  if (!raw) {
+    setStatus('请先粘贴要处理的内容', 'error');
+    return;
+  }
+
+  try {
+    const parsed = await parseSmart(inputBox.value);
+    if (parsed === null) {
+      setStatus('请先粘贴要处理的内容', 'error');
+      return;
+    }
+
+    inputBox.value = JSON.stringify(parsed);
+    saveInputDraft(inputBox.value);
+    lastParseFailed = false;
+    updateProcessInputButtonVisibility();
+    await processInput();
+    setStatus('已压缩输入内容', 'success');
+  } catch (error) {
+    lastParseFailed = true;
+    updateProcessInputButtonVisibility();
+    setStatus(error.message, 'error');
+  }
+}
+
 async function processInput() {
   const renderToken = ++latestRenderToken;
   const inputValue = inputBox.value;
@@ -849,6 +889,11 @@ contextUnescapeBtn.addEventListener('click', () => {
   hideContextMenu();
 });
 
+contextCompactBtn.addEventListener('click', () => {
+  compactInputContent();
+  hideContextMenu();
+});
+
 document.addEventListener('click', (event) => {
   if (!contextMenu.contains(event.target)) {
     hideContextMenu();
@@ -905,6 +950,10 @@ processInputBtn.addEventListener('click', () => {
   applyUnescapeToWholeInput();
 });
 
+compactBtn.addEventListener('click', () => {
+  compactInputContent();
+});
+
 fullscreenBtn.addEventListener('click', () => {
   toggleTreeFullscreen();
 });
@@ -934,27 +983,10 @@ copyValueBtn.addEventListener('click', () => {
   copyText(serializeValue(selectedTreeMeta.value), '已复制当前值');
 });
 
-copyNodeBtn.addEventListener('click', () => {
-  if (!selectedTreeMeta) return;
-  copyText(serializeNode(selectedTreeMeta), '已复制当前节点');
-});
-
-copyPathBtn = (() => {
-  const btn = document.createElement('button');
-  btn.id = 'copyPathBtn';
-  btn.className = 'ghost';
-  btn.textContent = '复制路径';
-  btn.addEventListener('click', () => {
-    if (!selectedTreeMeta) return;
-    copyText(formatPath(selectedTreeMeta.path), '已复制当前路径');
-  });
-  return btn;
-})();
-copyValueBtn.insertAdjacentElement('afterend', copyPathBtn);
-
 updateFullscreenButtonLabel();
 applyTheme(localStorage.getItem(THEME_STORAGE_KEY) === 'mono' ? 'mono' : 'color', false);
 updateTreeActionButtons();
+updateProcessInputButtonVisibility();
 
 const savedInput = localStorage.getItem(INPUT_STORAGE_KEY);
 if (savedInput) {
@@ -969,5 +1001,5 @@ collapseAllBtn.addEventListener('click', () => {
     return;
   }
   setAllCollapsed(true);
-  setStatus('已收起全部', 'success');
+  setStatus('已收起内容', 'success');
 });
