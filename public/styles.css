@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Heartfilia
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 :root {
   --page-bg: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
   --card: rgba(255, 255, 255, 0.82);
@@ -401,6 +417,77 @@ button.ghost:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent-1) 20%, var(--ghost-border));
   background: color-mix(in srgb, var(--panel-bg) 76%, white 24%);
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.theme-toggle-btn {
+  width: 42px;
+  min-width: 42px;
+  padding: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  transition:
+    transform .2s ease,
+    box-shadow .2s ease,
+    background .24s ease,
+    border-color .24s ease;
+}
+
+.theme-toggle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  transform-origin: 50% 50%;
+}
+
+.theme-icon {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  transition:
+    color .24s ease,
+    transform .34s cubic-bezier(.22, 1, .36, 1),
+    opacity .24s ease;
+}
+
+.theme-icon-sun {
+  color: #f59e0b;
+}
+
+.theme-icon-moon {
+  color: #5b6ee1;
+}
+
+body.theme-mono .theme-icon-sun {
+  color: #ffd166;
+}
+
+body.theme-mono .theme-icon-moon {
+  color: #c9d7ff;
+}
+
+.theme-toggle-btn.theme-toggle-animating .theme-icon {
+  animation: theme-icon-swap .42s cubic-bezier(.22, 1, .36, 1);
+}
+
+@keyframes theme-icon-swap {
+  0% {
+    opacity: 0;
+    transform: scale(.72) rotate(-90deg);
+  }
+  55% {
+    opacity: 1;
+    transform: scale(1.08) rotate(8deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
 }
 
 .toolbar-action-btn {

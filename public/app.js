@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Heartfilia
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 const inputBox = document.getElementById('inputBox');
 const treeView = document.getElementById('treeView');
 const treePanel = document.getElementById('treePanel');
@@ -48,6 +64,23 @@ let contextTreeMeta = null;
 let selectedPathKey = '';
 let contextMenuMode = 'input';
 let lastParseFailed = false;
+const THEME_TOGGLE_ICONS = {
+  color: `
+    <span class="theme-toggle-icon" aria-hidden="true">
+      <svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" focusable="false">
+        <path d="M20.2 14.1A8.6 8.6 0 1 1 9.9 3.8a7.2 7.2 0 1 0 10.3 10.3Z" />
+      </svg>
+    </span>
+  `,
+  mono: `
+    <span class="theme-toggle-icon" aria-hidden="true">
+      <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" focusable="false">
+        <circle cx="12" cy="12" r="4.2" />
+        <path d="M12 2.5v2.3M12 19.2v2.3M21.5 12h-2.3M4.8 12H2.5M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6M18.7 18.7l-1.6-1.6M6.9 6.9 5.3 5.3" />
+      </svg>
+    </span>
+  `
+};
 
 function nextFrame() {
   return new Promise((resolve) => {
@@ -97,12 +130,20 @@ function getCurrentTheme() {
 }
 
 function updateThemeButtonLabel() {
-  themeToggleBtn.textContent = getCurrentTheme() === 'mono' ? '白天模式' : '夜晚模式';
+  const currentTheme = getCurrentTheme();
+  const nextTheme = currentTheme === 'mono' ? 'color' : 'mono';
+  const label = nextTheme === 'mono' ? 'Switch to dark mode' : 'Switch to light mode';
+  themeToggleBtn.innerHTML = THEME_TOGGLE_ICONS[currentTheme];
+  themeToggleBtn.setAttribute('aria-label', label);
+  themeToggleBtn.setAttribute('title', label);
 }
 
 function applyTheme(theme, persist = true) {
+  themeToggleBtn.classList.remove('theme-toggle-animating');
   document.body.classList.toggle('theme-mono', theme === 'mono');
   updateThemeButtonLabel();
+  void themeToggleBtn.offsetWidth;
+  themeToggleBtn.classList.add('theme-toggle-animating');
   if (persist) {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
   }
