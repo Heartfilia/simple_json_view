@@ -35,6 +35,7 @@ const fullscreenBackdrop = document.getElementById('fullscreenBackdrop');
 const fullscreenHost = document.getElementById('fullscreenHost');
 const contextMenu = document.getElementById('contextMenu');
 const contextCopyPathBtn = document.getElementById('contextCopyPathBtn');
+const contextCopyKeyBtn = document.getElementById('contextCopyKeyBtn');
 const contextCopyValueBtn = document.getElementById('contextCopyValueBtn');
 const contextCopyNodeBtn = document.getElementById('contextCopyNodeBtn');
 const contextUnescapeBtn = document.getElementById('contextUnescapeBtn');
@@ -46,6 +47,10 @@ const AUTO_EXPAND_DEPTH = 1;
 const LARGE_INPUT_THRESHOLD = 50000;
 const FRAME_BUDGET_MS = 8;
 const CHILD_RENDER_BATCH_SIZE = 150;
+const INPUT_DRAFT_STORAGE_LIMIT = 200000;
+const ROOT_AUTO_COLLAPSE_ENTRY_THRESHOLD = 1000;
+const EXPAND_ALL_NODE_LIMIT = 12000;
+const EXPAND_ALL_STATUS_INTERVAL = 200;
 
 let latestRenderToken = 0;
 let latestParseToken = 0;
@@ -68,6 +73,9 @@ let contextMenuMode = 'input';
 let lastParseFailed = false;
 let isTreeBatchUpdating = false;
 let hasExpandedAllTree = false;
+let isLargeTreeMode = false;
+let latestTreeBatchToken = 0;
+let didWarnDraftStorageDisabled = false;
 const THEME_TOGGLE_ICONS = {
   color: `
     <span class="theme-toggle-icon" aria-hidden="true">
@@ -96,9 +104,57 @@ function nextFrame() {
   });
 }
 
+function getTickNow() {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function getContainerEntryCount(value) {
+  if (!value || typeof value !== 'object') return 0;
+  if (Array.isArray(value)) return value.length;
+  return Object.keys(value).length;
+}
+
+function createTreeBatchCancelledError() {
+  const error = new Error('批量树操作已取消');
+  error.name = 'TreeBatchCancelledError';
+  return error;
+}
+
+function assertTreeBatchActive(batchToken) {
+  if (batchToken !== undefined && batchToken !== latestTreeBatchToken) {
+    throw createTreeBatchCancelledError();
+  }
+}
+
+function cancelTreeBatchOperations() {
+  latestTreeBatchToken += 1;
+  if (!isTreeBatchUpdating) return;
+  isTreeBatchUpdating = false;
+  updateTreeBatchButtons();
+}
+
 function setStatus(message, type = 'muted') {
   statusBar.textContent = message;
   statusBar.className = `status status-inline ${type}`;
+}
+
+function updateExpandAllButtonTitle() {
+  let title = '展开全部';
+  if (isLargeTreeMode) {
+    title = '超大内容模式下已禁用展开全部，请使用搜索或逐层展开';
+  } else if (hasExpandedAllTree) {
+    title = '当前内容已全部展开';
+  } else if (isTreeBatchUpdating) {
+    title = '正在批量处理节点';
+  } else if (!currentData) {
+    title = '请先粘贴并完成解析';
+  }
+
+  expandAllBtn.setAttribute('title', title);
+  expandAllBtn.setAttribute('aria-label', title);
 }
 
 function updateProcessInputButtonVisibility() {
@@ -111,8 +167,9 @@ function updateProcessInputButtonVisibility() {
 }
 
 function updateTreeBatchButtons() {
-  expandAllBtn.disabled = !currentData || isTreeBatchUpdating || hasExpandedAllTree;
+  expandAllBtn.disabled = !currentData || isTreeBatchUpdating || hasExpandedAllTree || isLargeTreeMode;
   collapseAllBtn.disabled = !currentData || isTreeBatchUpdating;
+  updateExpandAllButtonTitle();
 }
 
 function updateTreeActionButtons() {
@@ -159,7 +216,29 @@ function applyTheme(theme, persist = true) {
 }
 
 function saveInputDraft(value) {
-  localStorage.setItem(INPUT_STORAGE_KEY, value);
+  try {
+    if (!value) {
+      localStorage.removeItem(INPUT_STORAGE_KEY);
+      didWarnDraftStorageDisabled = false;
+      return true;
+    }
+
+    if (value.length > INPUT_DRAFT_STORAGE_LIMIT) {
+      localStorage.removeItem(INPUT_STORAGE_KEY);
+      return false;
+    }
+
+    localStorage.setItem(INPUT_STORAGE_KEY, value);
+    didWarnDraftStorageDisabled = false;
+    return true;
+  } catch {
+    try {
+      localStorage.removeItem(INPUT_STORAGE_KEY);
+    } catch {
+      // Ignore storage cleanup failures and continue parsing/rendering.
+    }
+    return false;
+  }
 }
 
 function pathToKey(path) {
@@ -476,22 +555,28 @@ function applyUnescapeToWholeInput() {
 
 function hideContextMenu() {
   contextMenu.classList.add('hidden');
+  contextMenu.style.visibility = '';
 }
 
 function showContextMenu(x, y) {
-  const menuWidth = 200;
-  const menuHeight = 176;
+  contextMenu.style.visibility = 'hidden';
+  contextMenu.classList.remove('hidden');
+  const menuWidth = contextMenu.offsetWidth || 200;
+  const menuHeight = contextMenu.offsetHeight || 176;
   const left = Math.min(x, window.innerWidth - menuWidth - 12);
   const top = Math.min(y, window.innerHeight - menuHeight - 12);
   contextMenu.style.left = `${Math.max(12, left)}px`;
   contextMenu.style.top = `${Math.max(12, top)}px`;
-  contextMenu.classList.remove('hidden');
+  contextMenu.style.visibility = '';
 }
 
 function setContextMenuMode(mode) {
   contextMenuMode = mode;
   const isInput = mode === 'input';
+  const activeMeta = contextTreeMeta || selectedTreeMeta;
+  const hasKey = activeMeta && activeMeta.key !== null && activeMeta.key !== undefined;
   contextCopyPathBtn.style.display = isInput ? 'none' : '';
+  contextCopyKeyBtn.style.display = isInput || !hasKey ? 'none' : '';
   contextCopyValueBtn.style.display = isInput ? 'none' : '';
   contextCopyNodeBtn.style.display = isInput ? 'none' : '';
   contextUnescapeBtn.style.display = isInput ? '' : 'none';
@@ -715,7 +800,9 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
 
   const children = document.createElement('div');
   children.className = 'tree-children';
-  const shouldStartCollapsed = level >= AUTO_EXPAND_DEPTH;
+  const entryCount = getContainerEntryCount(value);
+  const shouldStartCollapsed = level >= AUTO_EXPAND_DEPTH
+    || (level === 0 && entryCount >= ROOT_AUTO_COLLAPSE_ENTRY_THRESHOLD);
   let hasRenderedChildren = false;
   let isRenderingChildren = false;
   let renderChildrenPromise = null;
@@ -725,10 +812,11 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
     toggle.textContent = '▸';
   }
 
-  const ensureChildrenRendered = async () => {
+  const ensureChildrenRendered = async (batchToken) => {
     if (hasRenderedChildren) return;
     if (renderChildrenPromise) {
       await renderChildrenPromise;
+      assertTreeBatchActive(batchToken);
       return;
     }
 
@@ -742,6 +830,7 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
 
     renderChildrenPromise = (async () => {
       for (let index = 0; index < entries.length; index += CHILD_RENDER_BATCH_SIZE) {
+        assertTreeBatchActive(batchToken);
         const fragment = document.createDocumentFragment();
         const chunk = entries.slice(index, index + CHILD_RENDER_BATCH_SIZE);
 
@@ -753,6 +842,7 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
         children.appendChild(fragment);
         if (index + CHILD_RENDER_BATCH_SIZE < entries.length) {
           await nextFrame();
+          assertTreeBatchActive(batchToken);
         }
       }
 
@@ -769,28 +859,34 @@ function createTreeNodeShell(value, key = null, level = 0, path = []) {
     }
   };
 
+  const setCollapsedState = (collapsed) => {
+    children.classList.toggle('collapsed', collapsed);
+    toggle.textContent = collapsed ? '▸' : '▾';
+  };
+
   const toggleNode = async () => {
     const wasCollapsed = children.classList.contains('collapsed');
     if (wasCollapsed) {
       await ensureChildrenRendered();
     }
     if (isRenderingChildren) return;
-    const collapsed = children.classList.toggle('collapsed');
-    toggle.textContent = collapsed ? '▸' : '▾';
+    setCollapsedState(!children.classList.contains('collapsed'));
   };
 
-  const expandNode = async () => {
-    if (!children.classList.contains('collapsed')) {
-      if (renderChildrenPromise) {
-        await renderChildrenPromise;
-      }
-      return;
+  const expandNode = async (batchToken) => {
+    await ensureChildrenRendered(batchToken);
+    assertTreeBatchActive(batchToken);
+    if (isRenderingChildren) return;
+    if (children.classList.contains('collapsed')) {
+      setCollapsedState(false);
     }
-    await toggleNode();
   };
 
   node._expandNode = expandNode;
   node._ensureChildrenRendered = ensureChildrenRendered;
+  node._childrenContainer = children;
+  node._startsCollapsed = shouldStartCollapsed;
+  node._entryCount = entryCount;
 
   toggle.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -828,10 +924,16 @@ async function renderTreeAsync(data, renderToken) {
   const preferredRow = preferredNode.querySelector(':scope > .tree-row');
   setSelectedTreeRow(preferredRow, preferredRow._treeMeta);
 
-  if (typeof rootShell.node._ensureChildrenRendered === 'function') {
+  const rootStartsCollapsed = rootShell.node._startsCollapsed === true;
+  if (!rootStartsCollapsed && typeof rootShell.node._ensureChildrenRendered === 'function') {
     await rootShell.node._ensureChildrenRendered();
     if (renderToken !== latestRenderToken) return;
   }
+
+  return {
+    rootStartsCollapsed,
+    rootEntryCount: rootShell.node._entryCount || 0
+  };
 }
 
 function setAllCollapsed(collapsed) {
@@ -843,26 +945,47 @@ function setAllCollapsed(collapsed) {
   });
 }
 
-async function expandAllNodes() {
+async function expandAllNodes(batchToken) {
   const pendingNodes = Array.from(treeView.children);
+  let processedCount = 0;
+  let lastYieldAt = getTickNow();
 
   for (let index = 0; index < pendingNodes.length; index += 1) {
-    const node = pendingNodes[index];
-    if (typeof node._ensureChildrenRendered === 'function') {
-      await node._ensureChildrenRendered();
-      const children = node.querySelector(':scope > .tree-children');
-      if (children) {
-        pendingNodes.push(...Array.from(children.children));
-      }
+    assertTreeBatchActive(batchToken);
+    if (processedCount >= EXPAND_ALL_NODE_LIMIT) {
+      return {
+        completed: false,
+        processedCount
+      };
     }
 
-    if ((index + 1) % 25 === 0) {
-      setAllCollapsed(false);
+    const node = pendingNodes[index];
+    if (typeof node._expandNode === 'function') {
+      await node._expandNode(batchToken);
+      assertTreeBatchActive(batchToken);
+    }
+
+    const children = node._childrenContainer;
+    if (children && children.children.length) {
+      pendingNodes.push(...Array.from(children.children));
+    }
+
+    processedCount += 1;
+
+    const shouldYield = processedCount % EXPAND_ALL_STATUS_INTERVAL === 0
+      || getTickNow() - lastYieldAt >= FRAME_BUDGET_MS;
+    if (shouldYield) {
+      setStatus(`正在展开全部节点中，请稍等... 已处理 ${processedCount} 个节点`, 'processing');
       await nextFrame();
+      assertTreeBatchActive(batchToken);
+      lastYieldAt = getTickNow();
     }
   }
 
-  setAllCollapsed(false);
+  return {
+    completed: true,
+    processedCount
+  };
 }
 
 async function runTreeBatchAction(action, pendingMessage, successMessage, pendingType = 'muted') {
@@ -873,16 +996,26 @@ async function runTreeBatchAction(action, pendingMessage, successMessage, pendin
 
   if (isTreeBatchUpdating) return;
 
+  const batchToken = ++latestTreeBatchToken;
   isTreeBatchUpdating = true;
   updateTreeBatchButtons();
   setStatus(pendingMessage, pendingType);
 
   try {
-    await action();
+    await action(batchToken);
+    if (batchToken !== latestTreeBatchToken) return;
     setStatus(successMessage, 'success');
+  } catch (error) {
+    if (error?.name === 'TreeBatchCancelledError') {
+      return;
+    }
+    if (batchToken !== latestTreeBatchToken) return;
+    setStatus(error?.message || '操作失败，请稍后重试', 'error');
   } finally {
-    isTreeBatchUpdating = false;
-    updateTreeBatchButtons();
+    if (batchToken === latestTreeBatchToken) {
+      isTreeBatchUpdating = false;
+      updateTreeBatchButtons();
+    }
   }
 }
 
@@ -914,6 +1047,7 @@ async function compactInputContent() {
 }
 
 async function processInput() {
+  cancelTreeBatchOperations();
   const renderToken = ++latestRenderToken;
   const inputValue = inputBox.value;
 
@@ -921,6 +1055,7 @@ async function processInput() {
     currentData = null;
     lastParseFailed = false;
     hasExpandedAllTree = false;
+    isLargeTreeMode = false;
     treeView.textContent = '粘贴后会自动解析并显示在这里';
     treeView.classList.add('empty');
     setStatus('等待粘贴内容', 'muted');
@@ -931,6 +1066,7 @@ async function processInput() {
 
   try {
     const shouldShowBusy = inputValue.length >= LARGE_INPUT_THRESHOLD;
+    isLargeTreeMode = shouldShowBusy;
     if (shouldShowBusy) {
       treeView.textContent = '内容较大，正在处理中…';
       treeView.classList.add('empty');
@@ -947,8 +1083,19 @@ async function processInput() {
     updateProcessInputButtonVisibility();
     updateTreeBatchButtons();
     const startRender = async () => {
-      await renderTreeAsync(parsed, renderToken);
+      const renderResult = await renderTreeAsync(parsed, renderToken);
       if (renderToken !== latestRenderToken) return;
+      const rootStartsCollapsed = Boolean(renderResult?.rootStartsCollapsed);
+      isLargeTreeMode = isLargeTreeMode || rootStartsCollapsed;
+      updateTreeBatchButtons();
+      if (isLargeTreeMode) {
+        if (rootStartsCollapsed) {
+          setStatus(`超大内容模式：已默认收起根节点（${renderResult?.rootEntryCount || 0} 项），已禁用展开全部，请使用搜索或逐层展开`, 'processing');
+          return;
+        }
+        setStatus('超大内容模式：已禁用展开全部，请使用搜索或逐层展开', 'processing');
+        return;
+      }
       setStatus('解析完成', 'success');
     };
 
@@ -963,6 +1110,7 @@ async function processInput() {
     currentData = null;
     lastParseFailed = true;
     hasExpandedAllTree = false;
+    isLargeTreeMode = false;
     treeView.textContent = '解析失败，请检查内容格式';
     treeView.classList.add('empty');
     setStatus(error.message, 'error');
@@ -980,6 +1128,13 @@ inputBox.addEventListener('contextmenu', (event) => {
 contextCopyPathBtn.addEventListener('click', () => {
   if (!contextTreeMeta && !selectedTreeMeta) return;
   copyText(formatPath((contextTreeMeta || selectedTreeMeta).path), '已复制当前路径');
+  hideContextMenu();
+});
+
+contextCopyKeyBtn.addEventListener('click', () => {
+  const activeMeta = contextTreeMeta || selectedTreeMeta;
+  if (!activeMeta || activeMeta.key === null || activeMeta.key === undefined) return;
+  copyText(String(activeMeta.key), '已复制当前键名');
   hideContextMenu();
 });
 
@@ -1033,9 +1188,14 @@ inputBox.addEventListener('blur', () => {
 });
 
 inputBox.addEventListener('input', () => {
-  saveInputDraft(inputBox.value);
+  cancelTreeBatchOperations();
+  const didPersistDraft = saveInputDraft(inputBox.value);
   if (!inputBox.value.trim()) {
     lastParseFailed = false;
+  }
+  if (!didPersistDraft && !didWarnDraftStorageDisabled && inputBox.value.trim()) {
+    didWarnDraftStorageDisabled = true;
+    setStatus('内容过大，已跳过本地草稿保存，继续解析中', 'processing');
   }
   updateProcessInputButtonVisibility();
   clearTimeout(debounceTimer);
@@ -1043,11 +1203,13 @@ inputBox.addEventListener('input', () => {
 });
 
 clearBtn.addEventListener('click', () => {
+  cancelTreeBatchOperations();
   inputBox.value = '';
   saveInputDraft('');
   currentData = null;
   lastParseFailed = false;
   hasExpandedAllTree = false;
+  isLargeTreeMode = false;
   selectedTreeMeta = null;
   selectedTreeRow = null;
   selectedPathKey = '';
@@ -1106,7 +1268,12 @@ updateTreeActionButtons();
 updateProcessInputButtonVisibility();
 updateTreeBatchButtons();
 
-const savedInput = localStorage.getItem(INPUT_STORAGE_KEY);
+let savedInput = '';
+try {
+  savedInput = localStorage.getItem(INPUT_STORAGE_KEY) || '';
+} catch {
+  savedInput = '';
+}
 if (savedInput) {
   inputBox.value = savedInput;
   updateProcessInputButtonVisibility();
@@ -1121,10 +1288,17 @@ collapseAllBtn.addEventListener('click', () => {
 });
 
 expandAllBtn.addEventListener('click', () => {
+  if (isLargeTreeMode) {
+    setStatus('超大内容模式下已禁用展开全部，请使用搜索或逐层展开', 'error');
+    return;
+  }
   void runTreeBatchAction(
-    async () => {
-      await expandAllNodes();
-      hasExpandedAllTree = true;
+    async (batchToken) => {
+      const result = await expandAllNodes(batchToken);
+      hasExpandedAllTree = result.completed;
+      if (!result.completed) {
+        throw new Error(`节点过多，已暂停继续展开（已处理 ${result.processedCount} 个节点）。请使用搜索或逐层展开。`);
+      }
     },
     '正在展开全部节点中，请稍等...',
     '已展开全部内容',

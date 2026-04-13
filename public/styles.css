@@ -386,9 +386,10 @@ textarea {
   width: fit-content;
   max-width: 100%;
   min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding: 8px 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .muted { color: var(--muted); }
