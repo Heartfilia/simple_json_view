@@ -27,6 +27,7 @@ const searchPrevBtn = document.getElementById('searchPrevBtn');
 const searchNextBtn = document.getElementById('searchNextBtn');
 const copyValueBtn = document.getElementById('copyValueBtn');
 const clearBtn = document.getElementById('clearBtn');
+const expandAllBtn = document.getElementById('expandAllBtn');
 const collapseAllBtn = document.getElementById('collapseAllBtn');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
 const fullscreenCloseBtn = document.getElementById('fullscreenCloseBtn');
@@ -65,6 +66,8 @@ let contextTreeMeta = null;
 let selectedPathKey = '';
 let contextMenuMode = 'input';
 let lastParseFailed = false;
+let isTreeBatchUpdating = false;
+let hasExpandedAllTree = false;
 const THEME_TOGGLE_ICONS = {
   color: `
     <span class="theme-toggle-icon" aria-hidden="true">
@@ -105,6 +108,11 @@ function updateProcessInputButtonVisibility() {
   processInputBtn.classList.toggle('attention', shouldShow);
   compactBtn.disabled = !hasInput;
   clearBtn.disabled = !hasInput;
+}
+
+function updateTreeBatchButtons() {
+  expandAllBtn.disabled = !currentData || isTreeBatchUpdating || hasExpandedAllTree;
+  collapseAllBtn.disabled = !currentData || isTreeBatchUpdating;
 }
 
 function updateTreeActionButtons() {
@@ -835,6 +843,49 @@ function setAllCollapsed(collapsed) {
   });
 }
 
+async function expandAllNodes() {
+  const pendingNodes = Array.from(treeView.children);
+
+  for (let index = 0; index < pendingNodes.length; index += 1) {
+    const node = pendingNodes[index];
+    if (typeof node._ensureChildrenRendered === 'function') {
+      await node._ensureChildrenRendered();
+      const children = node.querySelector(':scope > .tree-children');
+      if (children) {
+        pendingNodes.push(...Array.from(children.children));
+      }
+    }
+
+    if ((index + 1) % 25 === 0) {
+      setAllCollapsed(false);
+      await nextFrame();
+    }
+  }
+
+  setAllCollapsed(false);
+}
+
+async function runTreeBatchAction(action, pendingMessage, successMessage, pendingType = 'muted') {
+  if (!currentData) {
+    setStatus('请先粘贴并完成解析', 'error');
+    return;
+  }
+
+  if (isTreeBatchUpdating) return;
+
+  isTreeBatchUpdating = true;
+  updateTreeBatchButtons();
+  setStatus(pendingMessage, pendingType);
+
+  try {
+    await action();
+    setStatus(successMessage, 'success');
+  } finally {
+    isTreeBatchUpdating = false;
+    updateTreeBatchButtons();
+  }
+}
+
 async function compactInputContent() {
   const raw = inputBox.value.trim();
   if (!raw) {
@@ -869,10 +920,12 @@ async function processInput() {
   if (!inputValue.trim()) {
     currentData = null;
     lastParseFailed = false;
+    hasExpandedAllTree = false;
     treeView.textContent = '粘贴后会自动解析并显示在这里';
     treeView.classList.add('empty');
     setStatus('等待粘贴内容', 'muted');
     updateProcessInputButtonVisibility();
+    updateTreeBatchButtons();
     return;
   }
 
@@ -890,7 +943,9 @@ async function processInput() {
 
     currentData = parsed;
     lastParseFailed = false;
+    hasExpandedAllTree = false;
     updateProcessInputButtonVisibility();
+    updateTreeBatchButtons();
     const startRender = async () => {
       await renderTreeAsync(parsed, renderToken);
       if (renderToken !== latestRenderToken) return;
@@ -907,10 +962,12 @@ async function processInput() {
     if (renderToken !== latestRenderToken) return;
     currentData = null;
     lastParseFailed = true;
+    hasExpandedAllTree = false;
     treeView.textContent = '解析失败，请检查内容格式';
     treeView.classList.add('empty');
     setStatus(error.message, 'error');
     updateProcessInputButtonVisibility();
+    updateTreeBatchButtons();
   }
 }
 
@@ -990,6 +1047,7 @@ clearBtn.addEventListener('click', () => {
   saveInputDraft('');
   currentData = null;
   lastParseFailed = false;
+  hasExpandedAllTree = false;
   selectedTreeMeta = null;
   selectedTreeRow = null;
   selectedPathKey = '';
@@ -1002,6 +1060,7 @@ clearBtn.addEventListener('click', () => {
   setStatus('内容已清空', 'muted');
   updateTreeActionButtons();
   updateProcessInputButtonVisibility();
+  updateTreeBatchButtons();
 });
 
 processInputBtn.addEventListener('click', () => {
@@ -1045,6 +1104,7 @@ updateFullscreenButtonLabel();
 applyTheme(localStorage.getItem(THEME_STORAGE_KEY) === 'mono' ? 'mono' : 'color', false);
 updateTreeActionButtons();
 updateProcessInputButtonVisibility();
+updateTreeBatchButtons();
 
 const savedInput = localStorage.getItem(INPUT_STORAGE_KEY);
 if (savedInput) {
@@ -1054,10 +1114,20 @@ if (savedInput) {
 }
 
 collapseAllBtn.addEventListener('click', () => {
-  if (!currentData) {
-    setStatus('请先粘贴并完成解析', 'error');
-    return;
-  }
-  setAllCollapsed(true);
-  setStatus('已收起内容', 'success');
+  void runTreeBatchAction(() => {
+    setAllCollapsed(true);
+    hasExpandedAllTree = false;
+  }, '正在收起内容…', '已收起内容');
+});
+
+expandAllBtn.addEventListener('click', () => {
+  void runTreeBatchAction(
+    async () => {
+      await expandAllNodes();
+      hasExpandedAllTree = true;
+    },
+    '正在展开全部节点中，请稍等...',
+    '已展开全部内容',
+    'processing'
+  );
 });
