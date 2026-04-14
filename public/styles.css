@@ -119,6 +119,7 @@ body.theme-mono {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
+  position: relative;
 }
 
 .viewer-column {
@@ -147,6 +148,43 @@ body.theme-mono {
 .result-panel-placeholder {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.github-float {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  transform: translateX(-50%);
+  width: 28px;
+  height: 28px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--ghost-border) 88%, transparent);
+  background: color-mix(in srgb, var(--panel-bg) 94%, transparent);
+  color: var(--text);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.14);
+  backdrop-filter: blur(10px);
+  z-index: 3;
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+}
+
+.github-float svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+}
+
+.github-float:hover {
+  transform: translateX(-50%) translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--ghost-border));
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.2);
+}
+
+.github-float:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-offset: 2px;
 }
 
 .fullscreen-close-btn {
@@ -762,6 +800,12 @@ body.has-fullscreen-panel {
     min-height: 900px;
   }
   .actions-right { justify-content: flex-start; }
+}
+
+@media (orientation: landscape) and (min-width: 961px) {
+  .github-float {
+    display: inline-flex;
+  }
 }
 
 @media (max-width: 720px) {
