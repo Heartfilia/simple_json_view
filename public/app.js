@@ -44,11 +44,15 @@ const contextCompactBtn = document.getElementById('contextCompactBtn');
 let currentData = null;
 let debounceTimer = null;
 const AUTO_EXPAND_DEPTH = 1;
-const LARGE_INPUT_THRESHOLD = 50000;
+const LARGE_INPUT_BUSY_THRESHOLD = 50000;
+const EXTREME_INPUT_LENGTH_THRESHOLD = 400000;
 const FRAME_BUDGET_MS = 8;
 const CHILD_RENDER_BATCH_SIZE = 150;
 const INPUT_DRAFT_STORAGE_LIMIT = 200000;
-const ROOT_AUTO_COLLAPSE_ENTRY_THRESHOLD = 1000;
+const ROOT_AUTO_COLLAPSE_ENTRY_THRESHOLD = 800;
+const LARGE_TREE_ESTIMATE_NODE_THRESHOLD = 3500;
+const LARGE_TREE_ESTIMATE_SCAN_LIMIT = 5000;
+const LARGE_TREE_CONTAINER_BREADTH_THRESHOLD = 600;
 const EXPAND_ALL_NODE_LIMIT = 12000;
 const EXPAND_ALL_STATUS_INTERVAL = 200;
 
@@ -76,6 +80,7 @@ let hasExpandedAllTree = false;
 let isLargeTreeMode = false;
 let latestTreeBatchToken = 0;
 let didWarnDraftStorageDisabled = false;
+let currentTreeAnalysis = null;
 const THEME_TOGGLE_ICONS = {
   color: `
     <span class="theme-toggle-icon" aria-hidden="true">
@@ -115,6 +120,83 @@ function getContainerEntryCount(value) {
   if (!value || typeof value !== 'object') return 0;
   if (Array.isArray(value)) return value.length;
   return Object.keys(value).length;
+}
+
+function analyzeTreeComplexity(value, inputLength = 0) {
+  const rootEntryCount = getContainerEntryCount(value);
+
+  if (!value || typeof value !== 'object') {
+    return {
+      isLargeTree: inputLength >= EXTREME_INPUT_LENGTH_THRESHOLD,
+      reason: inputLength >= EXTREME_INPUT_LENGTH_THRESHOLD ? 'extreme-input' : 'simple-value',
+      rootEntryCount,
+      estimatedNodes: 1,
+      maxBreadth: 0,
+      scannedAll: true
+    };
+  }
+
+  let estimatedNodes = 0;
+  let maxBreadth = rootEntryCount;
+  let scannedAll = true;
+  const queue = [value];
+  let queueIndex = 0;
+
+  while (queueIndex < queue.length) {
+    const current = queue[queueIndex];
+    queueIndex += 1;
+    estimatedNodes += 1;
+    if (estimatedNodes >= LARGE_TREE_ESTIMATE_SCAN_LIMIT) {
+      scannedAll = false;
+      break;
+    }
+
+    if (!current || typeof current !== 'object') continue;
+
+    const entries = Array.isArray(current) ? current : Object.values(current);
+    if (entries.length > maxBreadth) {
+      maxBreadth = entries.length;
+    }
+
+    for (let index = 0; index < entries.length; index += 1) {
+      const child = entries[index];
+      if (child && typeof child === 'object') {
+        queue.push(child);
+      } else {
+        estimatedNodes += 1;
+        if (estimatedNodes >= LARGE_TREE_ESTIMATE_SCAN_LIMIT) {
+          scannedAll = false;
+          break;
+        }
+      }
+    }
+  }
+
+  const isExtremeInput = inputLength >= EXTREME_INPUT_LENGTH_THRESHOLD;
+  const isWideRoot = rootEntryCount >= ROOT_AUTO_COLLAPSE_ENTRY_THRESHOLD;
+  const isBroadTree = maxBreadth >= LARGE_TREE_CONTAINER_BREADTH_THRESHOLD;
+  const isDenseTree = estimatedNodes >= LARGE_TREE_ESTIMATE_NODE_THRESHOLD;
+  const isLargeTree = isExtremeInput || isWideRoot || isBroadTree || isDenseTree;
+
+  let reason = 'normal';
+  if (isExtremeInput) {
+    reason = 'extreme-input';
+  } else if (isWideRoot) {
+    reason = 'wide-root';
+  } else if (isBroadTree) {
+    reason = 'broad-tree';
+  } else if (isDenseTree) {
+    reason = 'dense-tree';
+  }
+
+  return {
+    isLargeTree,
+    reason,
+    rootEntryCount,
+    estimatedNodes,
+    maxBreadth,
+    scannedAll
+  };
 }
 
 function createTreeBatchCancelledError() {
@@ -1053,6 +1135,7 @@ async function processInput() {
 
   if (!inputValue.trim()) {
     currentData = null;
+    currentTreeAnalysis = null;
     lastParseFailed = false;
     hasExpandedAllTree = false;
     isLargeTreeMode = false;
@@ -1065,8 +1148,8 @@ async function processInput() {
   }
 
   try {
-    const shouldShowBusy = inputValue.length >= LARGE_INPUT_THRESHOLD;
-    isLargeTreeMode = shouldShowBusy;
+    const shouldShowBusy = inputValue.length >= LARGE_INPUT_BUSY_THRESHOLD;
+    isLargeTreeMode = false;
     if (shouldShowBusy) {
       treeView.textContent = '内容较大，正在处理中…';
       treeView.classList.add('empty');
@@ -1078,8 +1161,10 @@ async function processInput() {
     if (renderToken !== latestRenderToken || parsed === null) return;
 
     currentData = parsed;
+    currentTreeAnalysis = analyzeTreeComplexity(parsed, inputValue.length);
     lastParseFailed = false;
     hasExpandedAllTree = false;
+    isLargeTreeMode = currentTreeAnalysis.isLargeTree;
     updateProcessInputButtonVisibility();
     updateTreeBatchButtons();
     const startRender = async () => {
@@ -1089,11 +1174,23 @@ async function processInput() {
       isLargeTreeMode = isLargeTreeMode || rootStartsCollapsed;
       updateTreeBatchButtons();
       if (isLargeTreeMode) {
+        const analysis = currentTreeAnalysis || {};
+        const reasonLabelMap = {
+          'extreme-input': '文本体积特别大',
+          'wide-root': '根节点子项很多',
+          'broad-tree': '某一层节点很多',
+          'dense-tree': '整体节点很多',
+          'normal': '内容结构较大'
+        };
+        const reasonLabel = reasonLabelMap[analysis.reason] || '内容结构较大';
         if (rootStartsCollapsed) {
-          setStatus(`超大内容模式：已默认收起根节点（${renderResult?.rootEntryCount || 0} 项），已禁用展开全部，请使用搜索或逐层展开`, 'processing');
+          setStatus(
+            `超大内容模式：${reasonLabel}，已默认收起根节点（${renderResult?.rootEntryCount || 0} 项）并禁用展开全部，请使用搜索或逐层展开`,
+            'processing'
+          );
           return;
         }
-        setStatus('超大内容模式：已禁用展开全部，请使用搜索或逐层展开', 'processing');
+        setStatus(`超大内容模式：${reasonLabel}，已禁用展开全部，请使用搜索或逐层展开`, 'processing');
         return;
       }
       setStatus('解析完成', 'success');
@@ -1108,6 +1205,7 @@ async function processInput() {
   } catch (error) {
     if (renderToken !== latestRenderToken) return;
     currentData = null;
+    currentTreeAnalysis = null;
     lastParseFailed = true;
     hasExpandedAllTree = false;
     isLargeTreeMode = false;
@@ -1207,6 +1305,7 @@ clearBtn.addEventListener('click', () => {
   inputBox.value = '';
   saveInputDraft('');
   currentData = null;
+  currentTreeAnalysis = null;
   lastParseFailed = false;
   hasExpandedAllTree = false;
   isLargeTreeMode = false;
