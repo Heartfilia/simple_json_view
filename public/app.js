@@ -534,6 +534,92 @@ function normalizePythonLike(input) {
     .replace(/\[\s*null\s*\]/g, '[]');
 }
 
+function normalizeNumericObjectKeys(input) {
+  let result = '';
+  let inDouble = false;
+  let escape = false;
+  const stack = [];
+
+  const isNumberStart = (ch) => ch === '-' || /[0-9]/.test(ch);
+  const isNumberChar = (ch) => /[0-9eE+.\-]/.test(ch);
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+
+    if (escape) {
+      result += ch;
+      escape = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      result += ch;
+      if (inDouble) {
+        escape = true;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inDouble = !inDouble;
+      result += ch;
+      continue;
+    }
+
+    if (inDouble) {
+      result += ch;
+      continue;
+    }
+
+    const current = stack[stack.length - 1];
+    if (current && current.type === 'object' && current.expectingKey && isNumberStart(ch)) {
+      let end = i + 1;
+      while (end < input.length && isNumberChar(input[end])) {
+        end += 1;
+      }
+
+      const token = input.slice(i, end);
+      let next = end;
+      while (next < input.length && /\s/.test(input[next])) {
+        next += 1;
+      }
+
+      if (token !== '-' && input[next] === ':') {
+        result += `"${token}"`;
+        i = end - 1;
+        continue;
+      }
+    }
+
+    result += ch;
+
+    if (ch === '{') {
+      stack.push({ type: 'object', expectingKey: true });
+      continue;
+    }
+    if (ch === '[') {
+      stack.push({ type: 'array' });
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      stack.pop();
+      continue;
+    }
+    if (!current || current.type !== 'object') {
+      continue;
+    }
+    if (ch === ':') {
+      current.expectingKey = false;
+      continue;
+    }
+    if (ch === ',') {
+      current.expectingKey = true;
+    }
+  }
+
+  return result;
+}
+
 function parseSmartSync(input) {
   const raw = input.trim();
   if (!raw) return null;
@@ -547,6 +633,17 @@ function parseSmartSync(input) {
   for (const candidate of candidates) {
     try {
       return JSON.parse(candidate);
+    } catch (error) {
+      lastError = error;
+    }
+
+    const normalizedCandidate = normalizeNumericObjectKeys(candidate);
+    if (normalizedCandidate === candidate) {
+      continue;
+    }
+
+    try {
+      return JSON.parse(normalizedCandidate);
     } catch (error) {
       lastError = error;
     }
