@@ -1,6 +1,6 @@
 {
   "name": "json-pretty-web",
-  "version": "2.8.0",
+  "version": "3.0.0",
   "private": true,
   "description": "A pretty JSON formatter with Python dict compatibility",
   "license": "Apache-2.0",

@@ -25,6 +25,7 @@ const treeSearchInput = document.getElementById('treeSearchInput');
 const searchResultCount = document.getElementById('searchResultCount');
 const searchPrevBtn = document.getElementById('searchPrevBtn');
 const searchNextBtn = document.getElementById('searchNextBtn');
+const exactSearchToggleBtn = document.getElementById('exactSearchToggleBtn');
 const copyValueBtn = document.getElementById('copyValueBtn');
 const clearBtn = document.getElementById('clearBtn');
 const expandAllBtn = document.getElementById('expandAllBtn');
@@ -70,6 +71,7 @@ let selectedTreeRow = null;
 let searchResults = [];
 let searchResultIndex = -1;
 let searchKeyword = '';
+let isExactSearchEnabled = false;
 let treeNodeRegistry = new Map();
 let contextTreeMeta = null;
 let selectedPathKey = '';
@@ -376,6 +378,14 @@ async function copyText(text, successMessage) {
 function updateFullscreenButtonLabel() {
   fullscreenBtn.textContent = isTreeFullscreen ? '全屏中' : '全屏';
   fullscreenBtn.disabled = isTreeFullscreen;
+}
+
+function updateExactSearchToggleButton() {
+  if (!exactSearchToggleBtn) return;
+  const enabled = isTreeFullscreen && isExactSearchEnabled;
+  exactSearchToggleBtn.classList.toggle('is-active', enabled);
+  exactSearchToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+  exactSearchToggleBtn.setAttribute('title', enabled ? '关闭精准搜索' : '开启精准搜索');
 }
 
 function escapeHtml(value) {
@@ -789,6 +799,7 @@ async function enterTreeFullscreen() {
   isTreeFullscreenAnimating = false;
   isTreeFullscreen = true;
   updateFullscreenButtonLabel();
+  updateExactSearchToggleButton();
   setStatus('已进入全屏，按 Esc 可退出', 'success');
 }
 
@@ -806,6 +817,15 @@ async function exitTreeFullscreen() {
 
   isTreeFullscreenAnimating = false;
   isTreeFullscreen = false;
+  if (isExactSearchEnabled) {
+    isExactSearchEnabled = false;
+    updateExactSearchToggleButton();
+    if (treeSearchInput.value.trim() && currentData) {
+      runTreeSearch();
+    }
+  } else {
+    updateExactSearchToggleButton();
+  }
   updateFullscreenButtonLabel();
   setStatus('已退出全屏', 'success');
 }
@@ -843,6 +863,21 @@ function openTreeContextMenu(event, meta, row) {
   showContextMenu(event.clientX, event.clientY);
 }
 
+function normalizeExactSearchTerm(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim().toLowerCase();
+}
+
+function matchesExactSearch(value, keyword, key) {
+  const normalizedKeyword = normalizeExactSearchTerm(keyword);
+  if (!normalizedKeyword) return false;
+
+  const matchesKey = key !== null && normalizeExactSearchTerm(key) === normalizedKeyword;
+  if (matchesKey) return true;
+  if (value && typeof value === 'object') return false;
+  return normalizeExactSearchTerm(value) === normalizedKeyword;
+}
+
 function buildSearchMatches(value, keyword, path = [], key = null, matches = []) {
   const lowerKeyword = keyword.toLowerCase();
   const selfText = [
@@ -862,6 +897,25 @@ function buildSearchMatches(value, keyword, path = [], key = null, matches = [])
   if (value && typeof value === 'object') {
     Object.entries(value).forEach(([childKey, childValue]) => {
       buildSearchMatches(childValue, keyword, [...path, childKey], childKey, matches);
+    });
+  }
+
+  return matches;
+}
+
+function buildExactSearchMatches(value, keyword, path = [], key = null, matches = []) {
+  if (matchesExactSearch(value, keyword, key)) {
+    matches.push(path);
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => buildExactSearchMatches(item, keyword, [...path, index], index, matches));
+    return matches;
+  }
+
+  if (value && typeof value === 'object') {
+    Object.entries(value).forEach(([childKey, childValue]) => {
+      buildExactSearchMatches(childValue, keyword, [...path, childKey], childKey, matches);
     });
   }
 
@@ -907,10 +961,12 @@ function runTreeSearch() {
     return;
   }
 
-  searchResults = buildSearchMatches(currentData, keyword);
+  searchResults = isExactSearchEnabled
+    ? buildExactSearchMatches(currentData, keyword)
+    : buildSearchMatches(currentData, keyword);
   updateTreeActionButtons();
   if (!searchResults.length) {
-    setStatus('未找到匹配内容', 'error');
+    setStatus(isExactSearchEnabled ? '未找到精准匹配内容' : '未找到匹配内容', 'error');
     return;
   }
   void focusSearchResult(0);
@@ -1435,6 +1491,13 @@ fullscreenBtn.addEventListener('click', () => {
 
 fullscreenCloseBtn.addEventListener('click', () => {
   exitTreeFullscreen();
+});
+
+exactSearchToggleBtn.addEventListener('click', () => {
+  if (!isTreeFullscreen) return;
+  isExactSearchEnabled = !isExactSearchEnabled;
+  updateExactSearchToggleButton();
+  runTreeSearch();
 });
 
 themeToggleBtn.addEventListener('click', () => {

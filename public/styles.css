@@ -19,6 +19,7 @@
   --card: rgba(255, 255, 255, 0.82);
   --card-border: rgba(15, 23, 42, 0.08);
   --panel-bg: rgba(255, 255, 255, 0.86);
+  --content-surface: rgba(255, 253, 249, 0.96);
   --text: #0f172a;
   --muted: #64748b;
   --accent: #2563eb;
@@ -62,6 +63,7 @@ body.theme-mono {
   --card: rgba(16, 24, 48, 0.78);
   --card-border: rgba(255, 255, 255, 0.08);
   --panel-bg: rgba(7, 11, 24, 0.78);
+  --content-surface: rgba(7, 11, 24, 0.78);
   --text: #ebf2ff;
   --muted: #9db0d1;
   --accent: #7c9cff;
@@ -150,41 +152,40 @@ body.theme-mono {
   min-height: 0;
 }
 
-.github-float {
+.github-link {
   position: absolute;
   left: 50%;
-  bottom: 4px;
+  bottom: 1px;
   transform: translateX(-50%);
   width: 28px;
   height: 28px;
-  display: none;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--ghost-border) 88%, transparent);
-  background: color-mix(in srgb, var(--panel-bg) 94%, transparent);
-  color: var(--text);
-  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.14);
-  backdrop-filter: blur(10px);
-  z-index: 3;
-  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  color: color-mix(in srgb, var(--muted) 86%, var(--text));
+  opacity: 0.78;
+  transition: color .18s ease, opacity .18s ease, transform .18s ease;
+  z-index: 1;
 }
 
-.github-float svg {
-  width: 15px;
-  height: 15px;
+.github-link svg {
+  width: 18px;
+  height: 18px;
   fill: currentColor;
 }
 
-.github-float:hover {
+.github-link:hover {
+  color: var(--text);
+  opacity: 1;
   transform: translateX(-50%) translateY(-1px);
-  border-color: color-mix(in srgb, var(--accent) 26%, var(--ghost-border));
-  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.2);
 }
 
-.github-float:focus-visible {
+.github-link:focus-visible {
+  color: var(--text);
+  opacity: 1;
   outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent);
-  outline-offset: 2px;
+  outline-offset: 4px;
+  border-radius: 999px;
 }
 
 .fullscreen-close-btn {
@@ -390,7 +391,7 @@ textarea,
   min-height: 0;
   border-radius: 18px;
   border: 1px solid rgba(255,255,255,0.08);
-  background: var(--panel-bg);
+  background: var(--content-surface);
   color: var(--text);
   padding: 18px;
   overflow: auto;
@@ -597,6 +598,17 @@ body.theme-mono .theme-icon-moon {
   z-index: 3;
 }
 
+.fullscreen-search-toggle-btn {
+  display: none;
+}
+
+.fullscreen-search-toggle-btn.is-active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--ghost-border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-bg));
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 .fullscreen-backdrop {
   position: fixed;
   inset: 0;
@@ -668,6 +680,10 @@ body.theme-mono .theme-icon-moon {
   justify-content: center;
 }
 
+.fullscreen-host.active .fullscreen-search-toggle-btn {
+  display: inline-flex;
+}
+
 .fullscreen-host.active .result-panel-head .toolbar {
   gap: 10px;
   width: 100%;
@@ -676,7 +692,7 @@ body.theme-mono .theme-icon-moon {
   flex-wrap: wrap;
 }
 
-.fullscreen-host.active .result-panel-head button,
+.fullscreen-host.active .result-panel-head button:not(.search-nav-btn),
 .fullscreen-host.active .result-panel-head .toolbar-input {
   height: 40px;
   padding-top: 0;
@@ -693,7 +709,7 @@ body.theme-mono .theme-icon-moon {
   order: 99;
 }
 
-.fullscreen-host.active .result-panel-head button {
+.fullscreen-host.active .result-panel-head button:not(.search-nav-btn) {
   border-radius: 999px;
 }
 
@@ -800,11 +816,15 @@ body.has-fullscreen-panel {
     min-height: 900px;
   }
   .actions-right { justify-content: flex-start; }
+  .github-link {
+    bottom: 3px;
+  }
 }
 
 @media (orientation: landscape) and (min-width: 961px) {
-  .github-float {
-    display: inline-flex;
+  .primary-toolbar,
+  .result-toolbar {
+    gap: 8px;
   }
 }
 
