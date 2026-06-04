@@ -83,6 +83,7 @@ let isLargeTreeMode = false;
 let latestTreeBatchToken = 0;
 let didWarnDraftStorageDisabled = false;
 let currentTreeAnalysis = null;
+let shouldClearSearchOnNextInput = false;
 const THEME_TOGGLE_ICONS = {
   color: `
     <span class="theme-toggle-icon" aria-hidden="true">
@@ -378,6 +379,37 @@ async function copyText(text, successMessage) {
 function updateFullscreenButtonLabel() {
   fullscreenBtn.textContent = isTreeFullscreen ? '全屏中' : '全屏';
   fullscreenBtn.disabled = isTreeFullscreen;
+}
+
+function clearTreeSearchState(resetInput = true) {
+  searchResults = [];
+  searchResultIndex = -1;
+  searchKeyword = '';
+  treeView.querySelectorAll('.tree-row.search-hit').forEach((row) => row.classList.remove('search-hit'));
+  if (resetInput) {
+    treeSearchInput.value = '';
+  }
+  updateTreeActionButtons();
+}
+
+function isWholeInputReplacement(event) {
+  const inputTypes = new Set([
+    'insertFromPaste',
+    'insertFromDrop',
+    'insertReplacementText'
+  ]);
+  if (!inputTypes.has(event.inputType)) {
+    return false;
+  }
+
+  const currentValue = inputBox.value;
+  if (!currentValue) {
+    return true;
+  }
+
+  const selectionStart = inputBox.selectionStart ?? 0;
+  const selectionEnd = inputBox.selectionEnd ?? 0;
+  return selectionStart === 0 && selectionEnd === currentValue.length;
 }
 
 function updateExactSearchToggleButton() {
@@ -1438,8 +1470,16 @@ inputBox.addEventListener('blur', () => {
   setTimeout(hideContextMenu, 120);
 });
 
+inputBox.addEventListener('beforeinput', (event) => {
+  shouldClearSearchOnNextInput = isWholeInputReplacement(event);
+});
+
 inputBox.addEventListener('input', () => {
   cancelTreeBatchOperations();
+  if (shouldClearSearchOnNextInput) {
+    clearTreeSearchState();
+  }
+  shouldClearSearchOnNextInput = false;
   const didPersistDraft = saveInputDraft(inputBox.value);
   if (!inputBox.value.trim()) {
     lastParseFailed = false;
@@ -1465,10 +1505,7 @@ clearBtn.addEventListener('click', () => {
   selectedTreeMeta = null;
   selectedTreeRow = null;
   selectedPathKey = '';
-  searchResults = [];
-  searchResultIndex = -1;
-  searchKeyword = '';
-  treeSearchInput.value = '';
+  clearTreeSearchState();
   treeView.textContent = '粘贴后会自动解析并显示在这里';
   treeView.classList.add('empty');
   setStatus('内容已清空', 'muted');
