@@ -1564,8 +1564,37 @@ function readSharedUrlParam() {
   }
 }
 
+/* 浏览器直连时用于标识「受信任调用方」的请求头名 */
+const TOKEN_HEADER = 'X-Json-Pretty-Token';
+/* 应用标识头：与服务端 FETCH_LOCAL_APP 对应，也供目标服务自行校验 */
+const APP_HEADER = 'X-Json-Pretty-App';
+
+function readSharedToken() {
+  try {
+    const value = new URLSearchParams(window.location.search).get('token');
+    return value ? value.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function readSharedApp() {
+  try {
+    const value = new URLSearchParams(window.location.search).get('app');
+    return value ? value.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 async function requestRemoteJson(target) {
-  const response = await fetch(`${REMOTE_FETCH_ENDPOINT}?url=${encodeURIComponent(target)}`, {
+  const token = readSharedToken();
+  const app = readSharedApp();
+  const params = [`url=${encodeURIComponent(target)}`];
+  if (token) params.push(`token=${encodeURIComponent(token)}`);
+  if (app) params.push(`app=${encodeURIComponent(app)}`);
+
+  const response = await fetch(`${REMOTE_FETCH_ENDPOINT}?${params.join('&')}`, {
     headers: { Accept: 'application/json' }
   });
 
@@ -1619,13 +1648,28 @@ async function cancelResponseBody(response) {
  * 直连兜底：先看 Content-Length，超限就不下载；分块传输则流式累加，超限即中断。
  */
 async function requestRemoteJsonDirect(target) {
-  const response = await fetch(target, {
-    headers: { Accept: 'application/json, text/plain, */*' }
-  });
+  const token = readSharedToken();
+  const app = readSharedApp();
+  const headers = { Accept: 'application/json, text/plain, */*' };
+
+  if (app) {
+    /*
+     * 应用标识走请求头而不是拼进 URL：不会写进访问日志，
+     * 也不会在目标服务发生重定向时泄露给下一个地址。
+     * 代价是跨域请求会触发预检（OPTIONS），目标服务需要放行该头。
+     */
+    headers[APP_HEADER] = app;
+  }
+  if (token) {
+    headers[TOKEN_HEADER] = token;
+  }
+
+  const response = await fetch(target, { headers });
 
   if (!response.ok) {
     const error = new Error(`链接返回 HTTP ${response.status}`);
     error.code = 'upstream-status';
+    error.status = response.status;
     throw error;
   }
 
@@ -1673,6 +1717,36 @@ async function requestRemoteJsonDirect(target) {
   return { ok: true, isJson, content: text };
 }
 
+/*
+ * 这些错误说明「链接本身不合法」，浏览器直连也一样会失败，没必要重试。
+ * 其余（内网拦截、超时、连不上、上游报错）都值得让浏览器再试一次——
+ * 服务端和用户浏览器所处的网络位置不同，服务端访问不到的地址，
+ * 用户本机往往可以（最典型的就是 localhost）。
+ */
+const NO_DIRECT_RETRY_CODES = new Set(['bad-url', 'bad-redirect', 'payload-too-large', 'unauthorized']);
+
+function describeDirectFetchFailure(directError, target) {
+  const message = (directError && directError.message) || '';
+  const isLocalTarget = /^(localhost|127\.|\[::1\])/i.test(safeHostname(target));
+
+  if (isLocalTarget) {
+    return (
+      `${message}。浏览器直连本地服务失败，通常是该服务没允许跨域：` +
+      '它需要返回 Access-Control-Allow-Origin 响应头'
+    );
+  }
+
+  return `${message}。通常是跨域限制（目标站点需要返回 Access-Control-Allow-Origin），或该地址在当前网络下不可达`;
+}
+
+function safeHostname(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname;
+  } catch {
+    return '';
+  }
+}
+
 async function loadJsonFromSharedUrl(target) {
   setStatus('正在获取链接内容…', 'processing');
 
@@ -1686,14 +1760,29 @@ async function loadJsonFromSharedUrl(target) {
   }
 
   if (!payload) {
-    if (!proxyError || !proxyError.proxyUnavailable) {
-      if (proxyError && proxyError.code === 'payload-too-large') {
-        showTooLargeNotice(proxyError);
-        setStatus(buildTooLargeMessage(proxyError), 'error');
-        return;
-      }
-      setStatus(`获取链接内容失败：${proxyError?.message || '未知错误'}`, 'error');
+    if (proxyError && proxyError.code === 'payload-too-large') {
+      showTooLargeNotice(proxyError);
+      setStatus(buildTooLargeMessage(proxyError), 'error');
       return;
+    }
+
+    if (proxyError && proxyError.code === 'unauthorized') {
+      setStatus(`获取链接内容失败：${proxyError.message}`, 'error');
+      return;
+    }
+
+    const shouldRetryDirectly =
+      !proxyError ||
+      proxyError.proxyUnavailable ||
+      !NO_DIRECT_RETRY_CODES.has(proxyError.code);
+
+    if (!shouldRetryDirectly) {
+      setStatus(`获取链接内容失败：${proxyError.message}`, 'error');
+      return;
+    }
+
+    if (proxyError) {
+      setStatus('服务端取不到，正在用浏览器直连重试…', 'processing');
     }
 
     try {
@@ -1704,8 +1793,18 @@ async function loadJsonFromSharedUrl(target) {
         setStatus(buildTooLargeMessage(directError), 'error');
         return;
       }
+      if (directError && directError.status === 401) {
+        const app = readSharedApp();
+        const hint = app
+          ? `请确认 ?app=${app} 是该服务认可的标识`
+          : readSharedToken()
+            ? '请确认 ?token= 与该服务配置的令牌一致'
+            : '该服务需要身份标识，请在 URL 上补 ?app=xxx';
+        setStatus(`获取链接内容失败：目标服务返回 401，${hint}`, 'error');
+        return;
+      }
       setStatus(
-        `获取链接内容失败：${directError?.message || proxyError.message}（若为跨域限制，请通过带服务端的地址访问）`,
+        `获取链接内容失败：${describeDirectFetchFailure(directError, target)}`,
         'error'
       );
       return;

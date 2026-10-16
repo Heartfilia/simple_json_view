@@ -18,6 +18,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const dns = require('dns');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3456;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -42,6 +43,29 @@ const FETCH_ALLOW_HOSTS = String(process.env.FETCH_ALLOW_HOSTS || '')
   .map((item) => item.trim().toLowerCase().replace(/\.$/, ''))
   .filter(Boolean);
 const FETCH_ALLOW_PRIVATE = /^(1|true|yes|on)$/i.test(String(process.env.FETCH_ALLOW_PRIVATE || '').trim());
+
+/*
+ * 访问令牌：配置后 /api/fetch 必须带匹配的 token 参数才允许抓取。
+ * 用于把公网部署的抓取接口限定给「受信任的软件」使用。
+ */
+const FETCH_TOKEN = String(process.env.FETCH_TOKEN || '').trim();
+
+/*
+ * 本地访问授权标识：请求带 ?app=<此值> 时，本次请求允许访问内网地址。
+ *
+ * 注意它**不是密钥**，只是一个应用标识，用来把「允许摸内网」这件事
+ * 限定给特定场景，而不是全局打开（全局打开要用 FETCH_ALLOW_PRIVATE=1）。
+ * 只有在确实需要「服务端自己去访问内网地址」时才配置它。
+ */
+const FETCH_LOCAL_APP = String(process.env.FETCH_LOCAL_APP || '').trim();
+
+/* 定长比较，避免通过响应时间推测令牌内容 */
+function safeTokenEqual(provided, expected) {
+  const a = Buffer.from(String(provided), 'utf8');
+  const b = Buffer.from(String(expected), 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -127,10 +151,10 @@ function isHostAllowlisted(hostname) {
   });
 }
 
-async function assertPublicHost(hostname) {
+async function assertPublicHost(hostname, allowPrivate) {
   const host = String(hostname).replace(/^\[|\]$/g, '');
 
-  if (FETCH_ALLOW_PRIVATE || isHostAllowlisted(host)) {
+  if (allowPrivate || FETCH_ALLOW_PRIVATE || isHostAllowlisted(host)) {
     return;
   }
 
@@ -138,11 +162,11 @@ async function assertPublicHost(hostname) {
   try {
     records = await dns.promises.lookup(host, { all: true, verbatim: true });
   } catch {
-    throw Object.assign(new Error('无法解析链接的域名'), { statusCode: 400 });
+    throw Object.assign(new Error('无法解析链接的域名'), { statusCode: 400, code: 'bad-url' });
   }
 
   if (!records.length) {
-    throw Object.assign(new Error('无法解析链接的域名'), { statusCode: 400 });
+    throw Object.assign(new Error('无法解析链接的域名'), { statusCode: 400, code: 'bad-url' });
   }
 
   for (const record of records) {
@@ -151,7 +175,7 @@ async function assertPublicHost(hostname) {
         new Error(
           `内网地址已被拦截（${host} → ${record.address}）。如需访问，请用 FETCH_ALLOW_HOSTS=${host} 或 FETCH_ALLOW_PRIVATE=1 启动服务`
         ),
-        { statusCode: 403 }
+        { statusCode: 403, code: 'blocked-host' }
       );
     }
   }
@@ -225,20 +249,24 @@ async function readLimitedText(response, onProgress) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function fetchRemoteText(rawUrl) {
+async function fetchRemoteText(rawUrl, options) {
+  const settings = options || {};
+  const allowPrivate = Boolean(settings.allowPrivate);
+  const appHeader = settings.app || '';
+
   let current;
   try {
     current = new URL(rawUrl);
   } catch {
-    throw Object.assign(new Error('链接格式不正确'), { statusCode: 400 });
+    throw Object.assign(new Error('链接格式不正确'), { statusCode: 400, code: 'bad-url' });
   }
 
   for (let hop = 0; hop <= REMOTE_FETCH_MAX_REDIRECTS; hop += 1) {
     if (current.protocol !== 'http:' && current.protocol !== 'https:') {
-      throw Object.assign(new Error('仅支持 http / https 链接'), { statusCode: 400 });
+      throw Object.assign(new Error('仅支持 http / https 链接'), { statusCode: 400, code: 'bad-url' });
     }
 
-    await assertPublicHost(current.hostname);
+    await assertPublicHost(current.hostname, allowPrivate);
 
     const controller = new AbortController();
     const deadline = Date.now() + REMOTE_FETCH_TOTAL_TIMEOUT_MS;
@@ -250,14 +278,18 @@ async function fetchRemoteText(rawUrl) {
     };
     armIdleTimeout();
 
+    const requestHeaders = {
+      'User-Agent': REMOTE_FETCH_USER_AGENT,
+      Accept: 'application/json, text/plain, */*'
+    };
+    /* 把应用标识透传给目标服务，目标服务可据此做自己的校验 */
+    if (appHeader) requestHeaders['X-Json-Pretty-App'] = appHeader;
+
     try {
       const response = await fetch(current.toString(), {
         redirect: 'manual',
         signal: controller.signal,
-        headers: {
-          'User-Agent': REMOTE_FETCH_USER_AGENT,
-          Accept: 'application/json, text/plain, */*'
-        }
+        headers: requestHeaders
       });
 
       if (REDIRECT_STATUS_CODES.has(response.status)) {
@@ -340,8 +372,33 @@ async function handleRemoteFetch(req, res, requestUrl) {
     return;
   }
 
+  const app = requestUrl.searchParams.get('app') || '';
+  /*
+   * ?app=<FETCH_LOCAL_APP> 时本次请求放行内网地址。
+   * 用于「服务端自己也要访问内网」的场景（比如工具和本地服务跑在同一台机器上）。
+   * 注意：浏览器直连那条路径本来就能到用户的机器，不需要这个开关。
+   */
+  const allowPrivate = Boolean(FETCH_LOCAL_APP) && app === FETCH_LOCAL_APP;
+
+  /*
+   * 配置了 FETCH_TOKEN 之后，/api/fetch 就只对持有令牌的调用方开放。
+   * 这样即使站点部署在公网，也不会被陌生人当成开放代理随意使用。
+   * 不配置则完全跳过校验（默认行为不变）。
+   */
+  if (FETCH_TOKEN) {
+    const provided = requestUrl.searchParams.get('token') || '';
+    if (!safeTokenEqual(provided, FETCH_TOKEN)) {
+      sendJson(res, 401, {
+        ok: false,
+        code: 'unauthorized',
+        error: 'token 无效或缺失。请带上与 FETCH_TOKEN 一致的 token 参数'
+      });
+      return;
+    }
+  }
+
   try {
-    const result = await fetchRemoteText(target);
+    const result = await fetchRemoteText(target, { allowPrivate, app });
     const trimmed = result.text.trim();
     let isJson = false;
 
@@ -424,5 +481,7 @@ server.listen(PORT, HOST, () => {
   console.log(`  本机访问：http://localhost:${PORT}`);
   console.log(`  监听地址：${HOST}:${PORT}`);
   console.log(`  抓取策略：${fetchPolicy}`);
+  console.log(`  访问令牌：${FETCH_TOKEN ? '已启用（/api/fetch 需要 token）' : '未启用'}`);
+  console.log(`  本地授权：${FETCH_LOCAL_APP ? `已启用（?app=${FETCH_LOCAL_APP} 可访问内网地址）` : '未启用'}`);
   console.log('──────────────────────────────────────────────');
 });
