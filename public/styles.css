@@ -731,6 +731,43 @@ body.has-fullscreen-panel {
   color: var(--muted);
 }
 
+/* 解析失败提示：带出错行列与上下文片段 */
+.tree-view.parse-error {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.parse-error-title {
+  font-weight: 700;
+  color: var(--danger);
+  margin-bottom: 8px;
+}
+
+.parse-error-message {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.parse-error-snippet {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.08);
+  color: var(--text);
+  font: 13px/1.6 "SFMono-Regular", Consolas, monospace;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.parse-error-hint {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .tree-node { padding-left: 18px; }
 .tree-row {
   display: flex;

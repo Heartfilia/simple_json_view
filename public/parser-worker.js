@@ -14,261 +14,37 @@
  * limitations under the License.
  */
 
-function normalizePythonLike(input) {
-  let result = '';
-  let inSingle = false;
-  let inDouble = false;
-  let escape = false;
+/*
+ * 解析 Worker：只负责把解析挪出主线程，真正的解析逻辑在 json-parser.js。
+ * 主线程与 Worker 共用同一份实现，避免两边行为不一致。
+ */
 
-  const appendEscapedControl = (ch) => {
-    if (ch === '\n') return '\\n';
-    if (ch === '\r') return '\\r';
-    if (ch === '\t') return '\\t';
-    return ch;
-  };
-
-  const nextNonSpaceChar = (text, start) => {
-    for (let i = start; i < text.length; i += 1) {
-      if (!/\s/.test(text[i])) return text[i];
-    }
-    return '';
-  };
-
-  for (let i = 0; i < input.length; i += 1) {
-    const ch = input[i];
-
-    if (escape) {
-      if (inSingle && ch === '"') {
-        result += '\\"';
-      } else if (inSingle || inDouble) {
-        result += appendEscapedControl(ch);
-      } else {
-        result += ch;
-      }
-      escape = false;
-      continue;
-    }
-
-    if (ch === '\\') {
-      result += ch;
-      escape = true;
-      continue;
-    }
-
-    if (inSingle) {
-      if (ch === "'") {
-        const nextChar = nextNonSpaceChar(input, i + 1);
-        if (!nextChar || ',:}]'.includes(nextChar)) {
-          inSingle = false;
-          result += '"';
-        } else {
-          result += "'";
-        }
-      } else if (ch === '"') {
-        result += '\\"';
-      } else {
-        result += appendEscapedControl(ch);
-      }
-      continue;
-    }
-
-    if (inDouble) {
-      if (ch === '"') {
-        inDouble = false;
-        result += ch;
-      } else {
-        result += appendEscapedControl(ch);
-      }
-      continue;
-    }
-
-    if (ch === "'") {
-      inSingle = true;
-      result += '"';
-      continue;
-    }
-
-    if (ch === '"') {
-      inDouble = true;
-      result += ch;
-      continue;
-    }
-
-    if (ch === '.' && input.slice(i, i + 3) === '...') {
-      result += 'null';
-      i += 2;
-      continue;
-    }
-
-    if (!inSingle && !inDouble && /[A-Za-z_]/.test(ch)) {
-      let token = ch;
-      let j = i + 1;
-      while (j < input.length && /[A-Za-z0-9_]/.test(input[j])) {
-        token += input[j];
-        j += 1;
-      }
-
-      if (token === 'True') {
-        result += 'true';
-        i = j - 1;
-        continue;
-      }
-      if (token === 'False') {
-        result += 'false';
-        i = j - 1;
-        continue;
-      }
-      if (token === 'None') {
-        result += 'null';
-        i = j - 1;
-        continue;
-      }
-    }
-
-    result += ch;
-  }
-
-  return result
-    .replace(/,\s*([}\]])/g, '$1')
-    .replace(/\{\s*null\s*\}/g, '{}')
-    .replace(/\[\s*null\s*\]/g, '[]');
-}
-
-function normalizeNumericObjectKeys(input) {
-  let result = '';
-  let inDouble = false;
-  let escape = false;
-  const stack = [];
-
-  const isNumberStart = (ch) => ch === '-' || /[0-9]/.test(ch);
-  const isNumberChar = (ch) => /[0-9eE+.\-]/.test(ch);
-
-  for (let i = 0; i < input.length; i += 1) {
-    const ch = input[i];
-
-    if (escape) {
-      result += ch;
-      escape = false;
-      continue;
-    }
-
-    if (ch === '\\') {
-      result += ch;
-      if (inDouble) {
-        escape = true;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inDouble = !inDouble;
-      result += ch;
-      continue;
-    }
-
-    if (inDouble) {
-      result += ch;
-      continue;
-    }
-
-    const current = stack[stack.length - 1];
-    if (current && current.type === 'object' && current.expectingKey && isNumberStart(ch)) {
-      let end = i + 1;
-      while (end < input.length && isNumberChar(input[end])) {
-        end += 1;
-      }
-
-      const token = input.slice(i, end);
-      let next = end;
-      while (next < input.length && /\s/.test(input[next])) {
-        next += 1;
-      }
-
-      if (token !== '-' && input[next] === ':') {
-        result += `"${token}"`;
-        i = end - 1;
-        continue;
-      }
-    }
-
-    result += ch;
-
-    if (ch === '{') {
-      stack.push({ type: 'object', expectingKey: true });
-      continue;
-    }
-    if (ch === '[') {
-      stack.push({ type: 'array' });
-      continue;
-    }
-    if (ch === '}' || ch === ']') {
-      stack.pop();
-      continue;
-    }
-    if (!current || current.type !== 'object') {
-      continue;
-    }
-    if (ch === ':') {
-      current.expectingKey = false;
-      continue;
-    }
-    if (ch === ',') {
-      current.expectingKey = true;
-    }
-  }
-
-  return result;
-}
-
-function parseSmart(input) {
-  const raw = input.trim();
-  if (!raw) {
-    return { empty: true };
-  }
-
-  const candidates = [
-    raw,
-    normalizePythonLike(raw)
-  ];
-
-  let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      return { value: JSON.parse(candidate) };
-    } catch (error) {
-      lastError = error;
-    }
-
-    const normalizedCandidate = normalizeNumericObjectKeys(candidate);
-    if (normalizedCandidate === candidate) {
-      continue;
-    }
-
-    try {
-      return { value: JSON.parse(normalizedCandidate) };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw new Error(`解析失败：${lastError ? lastError.message : '未知错误'}`);
-}
+importScripts('./json-parser.js');
 
 self.addEventListener('message', (event) => {
   const { id, input } = event.data || {};
 
   try {
-    const result = parseSmart(String(input || ''));
+    const result = self.SmartJSON.tryParse(input);
     self.postMessage({
       id,
-      ok: true,
-      ...result
+      ok: result.ok,
+      empty: Boolean(result.empty),
+      value: result.value,
+      mode: result.mode,
+      detail: result.detail
     });
   } catch (error) {
     self.postMessage({
       id,
       ok: false,
-      error: error instanceof Error ? error.message : '解析失败：未知错误'
+      detail: {
+        summary: `解析失败：${error instanceof Error ? error.message : '未知错误'}`,
+        reason: '存在语法错误',
+        line: -1,
+        column: -1,
+        snippet: ''
+      }
     });
   }
 });

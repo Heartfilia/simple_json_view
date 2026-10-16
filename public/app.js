@@ -56,6 +56,8 @@ const LARGE_TREE_ESTIMATE_SCAN_LIMIT = 5000;
 const LARGE_TREE_CONTAINER_BREADTH_THRESHOLD = 600;
 const EXPAND_ALL_NODE_LIMIT = 12000;
 const EXPAND_ALL_STATUS_INTERVAL = 200;
+/* 不超过这个长度就在主线程直接解析，省掉 Worker 往返开销 */
+const SYNC_PARSE_MAX_LENGTH = 8192;
 
 let latestRenderToken = 0;
 let latestParseToken = 0;
@@ -224,6 +226,47 @@ function cancelTreeBatchOperations() {
 function setStatus(message, type = 'muted') {
   statusBar.textContent = message;
   statusBar.className = `status status-inline ${type}`;
+}
+
+function showTreePlaceholder(message) {
+  treeView.classList.remove('parse-error');
+  treeView.textContent = message;
+  treeView.classList.add('empty');
+}
+
+/**
+ * 解析失败时在结果区展示「错在哪一行、错在哪一列」以及带箭头的上下文片段，
+ * 比原来一句「解析失败，请检查内容格式」有用得多。
+ */
+function showParseErrorPanel(detail) {
+  const info = detail || {};
+
+  treeView.classList.remove('empty');
+  treeView.classList.add('parse-error');
+  treeView.textContent = '';
+
+  const title = document.createElement('div');
+  title.className = 'parse-error-title';
+  title.textContent = '解析失败';
+
+  const message = document.createElement('div');
+  message.className = 'parse-error-message';
+  message.textContent = info.summary || '解析失败，请检查内容格式';
+
+  treeView.appendChild(title);
+  treeView.appendChild(message);
+
+  if (info.snippet) {
+    const snippet = document.createElement('pre');
+    snippet.className = 'parse-error-snippet';
+    snippet.textContent = info.snippet;
+    treeView.appendChild(snippet);
+  }
+
+  const hint = document.createElement('div');
+  hint.className = 'parse-error-hint';
+  hint.textContent = '按提示修改输入框里的内容即可，改完会自动重新解析。';
+  treeView.appendChild(hint);
 }
 
 function updateExpandAllButtonTitle() {
@@ -455,243 +498,23 @@ function decodeWholeInputText(raw) {
     .replace(/\\\\/g, '\\');
 }
 
-function normalizePythonLike(input) {
-  const raw = input.trim();
-  let result = '';
-  let inSingle = false;
-  let inDouble = false;
-  let escape = false;
-
-  const appendEscapedControl = (ch) => {
-    if (ch === '\n') return '\\n';
-    if (ch === '\r') return '\\r';
-    if (ch === '\t') return '\\t';
-    return ch;
+function createParseError(result) {
+  const detail = (result && result.detail) || {
+    summary: '解析失败，请检查内容格式',
+    reason: '存在语法错误',
+    line: -1,
+    column: -1,
+    snippet: ''
   };
-
-  const nextNonSpaceChar = (text, start) => {
-    for (let i = start; i < text.length; i += 1) {
-      if (!/\s/.test(text[i])) return text[i];
-    }
-    return '';
-  };
-
-  for (let i = 0; i < raw.length; i += 1) {
-    const ch = raw[i];
-
-    if (escape) {
-      if (inSingle && ch === '"') {
-        result += '\\"';
-      } else if (inSingle || inDouble) {
-        result += appendEscapedControl(ch);
-      } else {
-        result += ch;
-      }
-      escape = false;
-      continue;
-    }
-
-    if (ch === '\\') {
-      result += ch;
-      escape = true;
-      continue;
-    }
-
-    if (inSingle) {
-      if (ch === "'") {
-        const nextChar = nextNonSpaceChar(raw, i + 1);
-        if (!nextChar || ',:}]'.includes(nextChar)) {
-          inSingle = false;
-          result += '"';
-        } else {
-          result += "'";
-        }
-      } else if (ch === '"') {
-        result += '\\"';
-      } else {
-        result += appendEscapedControl(ch);
-      }
-      continue;
-    }
-
-    if (inDouble) {
-      if (ch === '"') {
-        inDouble = false;
-        result += ch;
-      } else {
-        result += appendEscapedControl(ch);
-      }
-      continue;
-    }
-
-    if (ch === "'") {
-      inSingle = true;
-      result += '"';
-      continue;
-    }
-
-    if (ch === '"') {
-      inDouble = true;
-      result += ch;
-      continue;
-    }
-
-    if (ch === '.' && raw.slice(i, i + 3) === '...') {
-      result += 'null';
-      i += 2;
-      continue;
-    }
-
-    if (!inSingle && !inDouble && /[A-Za-z_]/.test(ch)) {
-      let token = ch;
-      let j = i + 1;
-      while (j < raw.length && /[A-Za-z0-9_]/.test(raw[j])) {
-        token += raw[j];
-        j += 1;
-      }
-
-      if (token === 'True') {
-        result += 'true';
-        i = j - 1;
-        continue;
-      }
-      if (token === 'False') {
-        result += 'false';
-        i = j - 1;
-        continue;
-      }
-      if (token === 'None') {
-        result += 'null';
-        i = j - 1;
-        continue;
-      }
-    }
-
-    result += ch;
-  }
-
-  return result
-    .replace(/,\s*([}\]])/g, '$1')
-    .replace(/\{\s*null\s*\}/g, '{}')
-    .replace(/\[\s*null\s*\]/g, '[]');
+  const error = new Error(detail.summary);
+  error.parseDetail = detail;
+  return error;
 }
 
-function normalizeNumericObjectKeys(input) {
-  let result = '';
-  let inDouble = false;
-  let escape = false;
-  const stack = [];
-
-  const isNumberStart = (ch) => ch === '-' || /[0-9]/.test(ch);
-  const isNumberChar = (ch) => /[0-9eE+.\-]/.test(ch);
-
-  for (let i = 0; i < input.length; i += 1) {
-    const ch = input[i];
-
-    if (escape) {
-      result += ch;
-      escape = false;
-      continue;
-    }
-
-    if (ch === '\\') {
-      result += ch;
-      if (inDouble) {
-        escape = true;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inDouble = !inDouble;
-      result += ch;
-      continue;
-    }
-
-    if (inDouble) {
-      result += ch;
-      continue;
-    }
-
-    const current = stack[stack.length - 1];
-    if (current && current.type === 'object' && current.expectingKey && isNumberStart(ch)) {
-      let end = i + 1;
-      while (end < input.length && isNumberChar(input[end])) {
-        end += 1;
-      }
-
-      const token = input.slice(i, end);
-      let next = end;
-      while (next < input.length && /\s/.test(input[next])) {
-        next += 1;
-      }
-
-      if (token !== '-' && input[next] === ':') {
-        result += `"${token}"`;
-        i = end - 1;
-        continue;
-      }
-    }
-
-    result += ch;
-
-    if (ch === '{') {
-      stack.push({ type: 'object', expectingKey: true });
-      continue;
-    }
-    if (ch === '[') {
-      stack.push({ type: 'array' });
-      continue;
-    }
-    if (ch === '}' || ch === ']') {
-      stack.pop();
-      continue;
-    }
-    if (!current || current.type !== 'object') {
-      continue;
-    }
-    if (ch === ':') {
-      current.expectingKey = false;
-      continue;
-    }
-    if (ch === ',') {
-      current.expectingKey = true;
-    }
-  }
-
-  return result;
-}
-
-function parseSmartSync(input) {
-  const raw = input.trim();
-  if (!raw) return null;
-
-  const candidates = [
-    raw,
-    normalizePythonLike(raw)
-  ];
-
-  let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate);
-    } catch (error) {
-      lastError = error;
-    }
-
-    const normalizedCandidate = normalizeNumericObjectKeys(candidate);
-    if (normalizedCandidate === candidate) {
-      continue;
-    }
-
-    try {
-      return JSON.parse(normalizedCandidate);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw new Error(`解析失败：${lastError ? lastError.message : '未知错误'}`);
+function runParseSync(input) {
+  const result = SmartJSON.tryParse(input);
+  if (!result.ok) throw createParseError(result);
+  return result.empty ? null : result.value;
 }
 
 function getParseWorker() {
@@ -700,7 +523,7 @@ function getParseWorker() {
 
   parseWorker = new Worker('./parser-worker.js');
   parseWorker.addEventListener('message', (event) => {
-    const { id, ok, value, empty, error } = event.data || {};
+    const { id, ok, value, empty, detail } = event.data || {};
     const handlers = pendingWorkerJobs.get(id);
     if (!handlers) return;
 
@@ -709,12 +532,12 @@ function getParseWorker() {
       handlers.resolve(empty ? null : value);
       return;
     }
-    handlers.reject(new Error(error || '解析失败：未知错误'));
+    handlers.reject(createParseError({ detail }));
   });
 
   parseWorker.addEventListener('error', () => {
     pendingWorkerJobs.forEach(({ reject }) => {
-      reject(new Error('解析失败：Worker 执行异常'));
+      reject(new Error('解析失败：解析线程异常'));
     });
     pendingWorkerJobs.clear();
     parseWorker = null;
@@ -727,15 +550,31 @@ function parseSmart(input) {
   const raw = input.trim();
   if (!raw) return Promise.resolve(null);
 
+  /*
+   * 小输入直接在主线程解析：省掉 postMessage 与结构化克隆的往返开销，
+   * 实测这段开销对几百字节的输入来说比解析本身还大。
+   */
+  if (raw.length <= SYNC_PARSE_MAX_LENGTH) {
+    try {
+      return Promise.resolve(runParseSync(raw));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
   const worker = getParseWorker();
   if (!worker) {
-    return Promise.resolve(parseSmartSync(input));
+    try {
+      return Promise.resolve(runParseSync(raw));
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   const jobId = ++latestParseToken;
   return new Promise((resolve, reject) => {
     pendingWorkerJobs.set(jobId, { resolve, reject });
-    worker.postMessage({ id: jobId, input });
+    worker.postMessage({ id: jobId, input: raw });
   });
 }
 
@@ -1184,6 +1023,7 @@ async function renderTreeAsync(data, renderToken) {
   selectedTreeRow = null;
   treeView.innerHTML = '';
   treeView.classList.remove('empty');
+  treeView.classList.remove('parse-error');
 
   const rootShell = createTreeNodeShell(data);
   treeView.appendChild(rootShell.node);
@@ -1324,8 +1164,7 @@ async function processInput() {
     lastParseFailed = false;
     hasExpandedAllTree = false;
     isLargeTreeMode = false;
-    treeView.textContent = '粘贴后会自动解析并显示在这里';
-    treeView.classList.add('empty');
+    showTreePlaceholder('粘贴后会自动解析并显示在这里');
     setStatus('等待粘贴内容', 'muted');
     updateProcessInputButtonVisibility();
     updateTreeBatchButtons();
@@ -1336,8 +1175,7 @@ async function processInput() {
     const shouldShowBusy = inputValue.length >= LARGE_INPUT_BUSY_THRESHOLD;
     isLargeTreeMode = false;
     if (shouldShowBusy) {
-      treeView.textContent = '内容较大，正在处理中…';
-      treeView.classList.add('empty');
+      showTreePlaceholder('内容较大，正在处理中…');
       setStatus('内容较大，正在处理中', 'muted');
       await nextFrame();
     }
@@ -1394,8 +1232,7 @@ async function processInput() {
     lastParseFailed = true;
     hasExpandedAllTree = false;
     isLargeTreeMode = false;
-    treeView.textContent = '解析失败，请检查内容格式';
-    treeView.classList.add('empty');
+    showParseErrorPanel(error.parseDetail);
     setStatus(error.message, 'error');
     updateProcessInputButtonVisibility();
     updateTreeBatchButtons();
@@ -1506,8 +1343,7 @@ clearBtn.addEventListener('click', () => {
   selectedTreeRow = null;
   selectedPathKey = '';
   clearTreeSearchState();
-  treeView.textContent = '粘贴后会自动解析并显示在这里';
-  treeView.classList.add('empty');
+  showTreePlaceholder('粘贴后会自动解析并显示在这里');
   setStatus('内容已清空', 'muted');
   updateTreeActionButtons();
   updateProcessInputButtonVisibility();
@@ -1564,13 +1400,123 @@ updateTreeActionButtons();
 updateProcessInputButtonVisibility();
 updateTreeBatchButtons();
 
+const SHARED_URL_PARAM = 'url';
+const REMOTE_FETCH_ENDPOINT = '/api/fetch';
+
+function readSharedUrlParam() {
+  try {
+    const value = new URLSearchParams(window.location.search).get(SHARED_URL_PARAM);
+    return value ? value.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+async function requestRemoteJson(target) {
+  const response = await fetch(`${REMOTE_FETCH_ENDPOINT}?url=${encodeURIComponent(target)}`, {
+    headers: { Accept: 'application/json' }
+  });
+
+  let payload = null;
+  try {
+    payload = JSON.parse(await response.text());
+  } catch {
+    payload = null;
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    // 静态部署时该接口不存在，交给浏览器直连兜底。
+    const error = new Error(`服务端未返回有效内容（HTTP ${response.status}）`);
+    error.proxyUnavailable = true;
+    throw error;
+  }
+
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.error || `获取链接内容失败（HTTP ${response.status}）`);
+  }
+
+  return payload;
+}
+
+async function requestRemoteJsonDirect(target) {
+  const response = await fetch(target, {
+    headers: { Accept: 'application/json, text/plain, */*' }
+  });
+
+  if (!response.ok) {
+    throw new Error(`链接返回 HTTP ${response.status}`);
+  }
+
+  const text = await response.text();
+  const trimmed = text.trim();
+  let isJson = false;
+  if (trimmed) {
+    try {
+      JSON.parse(trimmed);
+      isJson = true;
+    } catch {
+      isJson = false;
+    }
+  }
+
+  return { ok: true, isJson, content: text };
+}
+
+async function loadJsonFromSharedUrl(target) {
+  setStatus('正在获取链接内容…', 'processing');
+
+  let payload = null;
+  let proxyError = null;
+
+  try {
+    payload = await requestRemoteJson(target);
+  } catch (error) {
+    proxyError = error;
+  }
+
+  if (!payload) {
+    if (!proxyError || !proxyError.proxyUnavailable) {
+      setStatus(`获取链接内容失败：${proxyError?.message || '未知错误'}`, 'error');
+      return;
+    }
+
+    try {
+      payload = await requestRemoteJsonDirect(target);
+    } catch (directError) {
+      setStatus(
+        `获取链接内容失败：${directError?.message || proxyError.message}（若为跨域限制，请通过带服务端的地址访问）`,
+        'error'
+      );
+      return;
+    }
+  }
+
+  if (!payload.isJson) {
+    setStatus('链接返回的内容不是 JSON，未填入输入框', 'error');
+    return;
+  }
+
+  inputBox.value = payload.content;
+  saveInputDraft(inputBox.value);
+  shouldClearSearchOnNextInput = true;
+  clearTreeSearchState();
+  updateProcessInputButtonVisibility();
+  await processInput();
+  setStatus('已从链接加载 JSON 内容', 'success');
+}
+
 let savedInput = '';
 try {
   savedInput = localStorage.getItem(INPUT_STORAGE_KEY) || '';
 } catch {
   savedInput = '';
 }
-if (savedInput) {
+
+const sharedUrl = readSharedUrlParam();
+if (sharedUrl) {
+  // 带 ?url= 分享链接时，优先展示链接内容。
+  void loadJsonFromSharedUrl(sharedUrl);
+} else if (savedInput) {
   inputBox.value = savedInput;
   updateProcessInputButtonVisibility();
   processInput();
