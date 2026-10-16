@@ -24,8 +24,12 @@ const HOST = process.env.HOST || '0.0.0.0';
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const REMOTE_FETCH_PATH = '/api/fetch';
-const REMOTE_FETCH_TIMEOUT_MS = 12000;
-const REMOTE_FETCH_MAX_BYTES = 5 * 1024 * 1024;
+/* 超时分两种：空闲 12s（每收到一块数据就重置）与总预算 60s。
+   只用总超时会把「下载慢但一直在推进」的大文件误杀。 */
+const REMOTE_FETCH_IDLE_TIMEOUT_MS = 12000;
+const REMOTE_FETCH_TOTAL_TIMEOUT_MS = 60000;
+/* ?url= 抓取的内容上限。超过就先看 Content-Length 直接拒绝，一个字节都不下载。 */
+const REMOTE_FETCH_MAX_BYTES = 20 * 1024 * 1024;
 const REMOTE_FETCH_MAX_REDIRECTS = 5;
 const REMOTE_FETCH_USER_AGENT = 'json-pretty-web/3.1 (+https://json.litetools.top)';
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
@@ -153,7 +157,42 @@ async function assertPublicHost(hostname) {
   }
 }
 
-async function readLimitedText(response) {
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '未知大小';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function createTooLargeError(bytes) {
+  return Object.assign(
+    new Error(
+      `链接内容过大（${formatBytes(bytes)}），超过 ${formatBytes(REMOTE_FETCH_MAX_BYTES)} 上限，已停止下载`
+    ),
+    {
+      statusCode: 413,
+      code: 'payload-too-large',
+      limitBytes: REMOTE_FETCH_MAX_BYTES,
+      contentLength: bytes
+    }
+  );
+}
+
+async function cancelResponseBody(response) {
+  try {
+    if (response.body && typeof response.body.cancel === 'function') {
+      await response.body.cancel();
+    }
+  } catch {
+    // 取消失败不影响主流程，连接最终会被关闭。
+  }
+}
+
+/**
+ * 流式读取响应体，每收到一块就回调 onProgress（用于重置空闲超时）。
+ * 超限立即中断，而不是读完整个文件再判断。
+ */
+async function readLimitedText(response, onProgress) {
   if (!response.body) return '';
 
   const reader = response.body.getReader();
@@ -164,11 +203,14 @@ async function readLimitedText(response) {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+
       total += value.length;
       if (total > REMOTE_FETCH_MAX_BYTES) {
-        throw Object.assign(new Error('链接返回的内容过大（超过 5MB）'), { statusCode: 413 });
+        throw createTooLargeError(total);
       }
+
       chunks.push(Buffer.from(value));
+      if (onProgress) onProgress();
     }
   } finally {
     if (typeof reader.releaseLock === 'function') {
@@ -199,11 +241,17 @@ async function fetchRemoteText(rawUrl) {
     await assertPublicHost(current.hostname);
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REMOTE_FETCH_TIMEOUT_MS);
-    let response;
+    const deadline = Date.now() + REMOTE_FETCH_TOTAL_TIMEOUT_MS;
+    let timer = null;
+    const armIdleTimeout = () => {
+      if (timer) clearTimeout(timer);
+      const remaining = Math.min(REMOTE_FETCH_IDLE_TIMEOUT_MS, deadline - Date.now());
+      timer = setTimeout(() => controller.abort(), Math.max(remaining, 1));
+    };
+    armIdleTimeout();
 
     try {
-      response = await fetch(current.toString(), {
+      const response = await fetch(current.toString(), {
         redirect: 'manual',
         signal: controller.signal,
         headers: {
@@ -211,42 +259,67 @@ async function fetchRemoteText(rawUrl) {
           Accept: 'application/json, text/plain, */*'
         }
       });
+
+      if (REDIRECT_STATUS_CODES.has(response.status)) {
+        const location = response.headers.get('location');
+        await cancelResponseBody(response);
+        if (!location) {
+          throw Object.assign(new Error('链接重定向缺少目标地址'), {
+            statusCode: 502,
+            code: 'bad-redirect'
+          });
+        }
+        let nextUrl;
+        try {
+          nextUrl = new URL(location, current);
+        } catch {
+          throw Object.assign(new Error('链接重定向目标无效'), {
+            statusCode: 502,
+            code: 'bad-redirect'
+          });
+        }
+        current = nextUrl;
+        continue;
+      }
+
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw Object.assign(new Error(`链接返回 HTTP ${response.status}`), {
+          statusCode: 502,
+          code: 'upstream-status'
+        });
+      }
+
+      /*
+       * 先看 Content-Length：超出上限就立刻掐断连接，一个字节都不下载。
+       * 分块传输没有该字段，才退回到下面的流式累加判断。
+       */
+      const declaredLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(declaredLength) && declaredLength > REMOTE_FETCH_MAX_BYTES) {
+        controller.abort();
+        throw createTooLargeError(declaredLength);
+      }
+
+      const text = await readLimitedText(response, armIdleTimeout);
+
+      return {
+        finalUrl: current.toString(),
+        contentType: response.headers.get('content-type') || '',
+        contentLength: response.headers.get('content-length') || '',
+        text
+      };
     } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw Object.assign(new Error('链接访问超时'), { statusCode: 504 });
+      if (error && error.statusCode) throw error;
+      if (error && error.name === 'AbortError') {
+        throw Object.assign(new Error('链接访问超时'), { statusCode: 504, code: 'timeout' });
       }
-      throw Object.assign(new Error('无法访问该链接'), { statusCode: 502 });
+      throw Object.assign(new Error('无法访问该链接'), { statusCode: 502, code: 'unreachable' });
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
-
-    if (REDIRECT_STATUS_CODES.has(response.status)) {
-      const location = response.headers.get('location');
-      if (!location) {
-        throw Object.assign(new Error('链接重定向缺少目标地址'), { statusCode: 502 });
-      }
-      let nextUrl;
-      try {
-        nextUrl = new URL(location, current);
-      } catch {
-        throw Object.assign(new Error('链接重定向目标无效'), { statusCode: 502 });
-      }
-      current = nextUrl;
-      continue;
-    }
-
-    if (!response.ok) {
-      throw Object.assign(new Error(`链接返回 HTTP ${response.status}`), { statusCode: 502 });
-    }
-
-    return {
-      finalUrl: current.toString(),
-      contentType: response.headers.get('content-type') || '',
-      text: await readLimitedText(response)
-    };
   }
 
-  throw Object.assign(new Error('链接重定向次数过多'), { statusCode: 502 });
+  throw Object.assign(new Error('链接重定向次数过多'), { statusCode: 502, code: 'bad-redirect' });
 }
 
 async function handleRemoteFetch(req, res, requestUrl) {
@@ -286,12 +359,16 @@ async function handleRemoteFetch(req, res, requestUrl) {
       isJson,
       finalUrl: result.finalUrl,
       contentType: result.contentType,
+      contentLength: result.contentLength,
       content: result.text
     });
   } catch (error) {
     sendJson(res, error.statusCode || 502, {
       ok: false,
-      error: error.message || '获取链接内容失败'
+      code: error.code || 'fetch-failed',
+      error: error.message || '获取链接内容失败',
+      limitBytes: error.limitBytes,
+      contentLength: error.contentLength
     });
   }
 }

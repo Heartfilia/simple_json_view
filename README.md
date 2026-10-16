@@ -10,6 +10,17 @@
 
 当前功能已经足够日常使用了
 
+### 输入框为空时，「清除」会变成「粘贴」
+
+点一下直接把剪贴板内容填进去并解析，省得长按调出系统粘贴菜单。
+
+浏览器不允许网页静默读取剪贴板，需要同时满足两个条件，否则按钮会给出具体原因并聚焦输入框：
+
+1. **安全上下文** —— HTTPS 或 localhost。用 `http://内网IP:3456` 这类地址访问时浏览器不提供剪贴板接口。
+2. **用户授权** —— 首次点击会弹权限提示。**一旦点了「拒绝」，之后会一直失败**，需要在地址栏左侧的站点设置里把「剪贴板」改成「允许」。
+
+不满足时直接按 `⌘ + V`（Windows/Linux 为 `Ctrl + V`）粘贴即可，效果一样。
+
 ## 容错解析
 
 粘贴进来就能用，不需要先手工清理。支持的情况：
@@ -62,7 +73,16 @@ https://json.litetools.top/?url=https%3A%2F%2Fexample.com%2Fdata.json
 - `url` 的值建议做 URL 编码（`encodeURIComponent`）。
 - 抓取由服务端接口 `/api/fetch` 完成，因此需要以 `node server.js` 运行；纯静态部署会退回浏览器直连，此时受目标站点的跨域（CORS）策略限制。
 - 判断是否为 JSON 以 `JSON.parse` 结果为准，不依赖响应头的 `Content-Type`，因此 `text/html` 返回 JSON 体的接口也能识别。
-- 出于安全考虑，`/api/fetch` 只允许 http/https，默认禁止访问内网地址，超时 12 秒，响应上限 5MB。
+- 出于安全考虑，`/api/fetch` 只允许 http/https，默认禁止访问内网地址。
+
+**内容大小限制（20MB）**
+
+链接返回的内容超过 **20MB** 就不下载：
+
+- 响应带 `Content-Length` 时，拿到响应头就判断，超出立即掐断连接（实测 25MB 的资源 11ms 就返回错误，客户端只收到一个分片）。
+- 分块传输没有 `Content-Length` 时，流式累加，一超过 20MB 立刻中断，不会把整个文件下完再判断。
+
+页面会明确提示「内容过大，已停止下载」并给出实际大小和上限，输入框保持为空。这个 20MB 只作用于 `?url=` 抓取路径，本地粘贴内容的处理不受影响。
 
 ### 访问内网接口
 
@@ -133,7 +153,7 @@ sudo vim /etc/nginx/conf.d/json-pretty.conf      # 把 json.example.com 改成�
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-> ⚠️ `proxy_read_timeout` 必须大于抓取接口的 12 秒超时（配置里已设 30s），否则 `?url=` 抓取会被 Nginx 提前掐断返回 504。
+> ⚠️ `proxy_read_timeout` 必须大于抓取接口的总预算（服务端 60s，配置里已设 90s），否则 `?url=` 抓取大一点的链接会被 Nginx 提前掐断返回 504。
 
 **5. 申请 HTTPS 证书**
 

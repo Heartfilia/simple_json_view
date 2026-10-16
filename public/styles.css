@@ -731,26 +731,26 @@ body.has-fullscreen-panel {
   color: var(--muted);
 }
 
-/* 解析失败提示：带出错行列与上下文片段 */
-.tree-view.parse-error {
+/* 结果区提示面板：解析失败 / 内容过大等 */
+.tree-view.notice {
   display: block;
   color: var(--text);
   font-size: 13px;
   line-height: 1.7;
 }
 
-.parse-error-title {
+.notice-title {
   font-weight: 700;
   color: var(--danger);
   margin-bottom: 8px;
 }
 
-.parse-error-message {
+.notice-message {
   color: var(--text);
   overflow-wrap: anywhere;
 }
 
-.parse-error-snippet {
+.notice-snippet {
   margin: 12px 0 0;
   padding: 12px 14px;
   border-radius: 12px;
@@ -762,7 +762,7 @@ body.has-fullscreen-panel {
   overflow-x: auto;
 }
 
-.parse-error-hint {
+.notice-hint {
   margin-top: 12px;
   color: var(--muted);
   font-size: 12px;

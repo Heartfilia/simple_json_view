@@ -229,44 +229,60 @@ function setStatus(message, type = 'muted') {
 }
 
 function showTreePlaceholder(message) {
-  treeView.classList.remove('parse-error');
+  treeView.classList.remove('notice');
   treeView.textContent = message;
   treeView.classList.add('empty');
 }
 
 /**
- * 解析失败时在结果区展示「错在哪一行、错在哪一列」以及带箭头的上下文片段，
+ * 在结果区展示一条提示（标题 + 说明 + 可选代码片段 + 可选操作建议）。
+ * 解析失败、内容过大等场景共用。
+ */
+function showResultNotice(options) {
+  const info = options || {};
+
+  treeView.classList.remove('empty');
+  treeView.classList.add('notice');
+  treeView.textContent = '';
+
+  const title = document.createElement('div');
+  title.className = 'notice-title';
+  title.textContent = info.title || '提示';
+  treeView.appendChild(title);
+
+  const message = document.createElement('div');
+  message.className = 'notice-message';
+  message.textContent = info.message || '';
+  treeView.appendChild(message);
+
+  if (info.snippet) {
+    const snippet = document.createElement('pre');
+    snippet.className = 'notice-snippet';
+    snippet.textContent = info.snippet;
+    treeView.appendChild(snippet);
+  }
+
+  if (info.hint) {
+    const hint = document.createElement('div');
+    hint.className = 'notice-hint';
+    hint.textContent = info.hint;
+    treeView.appendChild(hint);
+  }
+}
+
+/**
+ * 解析失败时展示「错在哪一行、错在哪一列」以及带箭头的上下文片段，
  * 比原来一句「解析失败，请检查内容格式」有用得多。
  */
 function showParseErrorPanel(detail) {
   const info = detail || {};
 
-  treeView.classList.remove('empty');
-  treeView.classList.add('parse-error');
-  treeView.textContent = '';
-
-  const title = document.createElement('div');
-  title.className = 'parse-error-title';
-  title.textContent = '解析失败';
-
-  const message = document.createElement('div');
-  message.className = 'parse-error-message';
-  message.textContent = info.summary || '解析失败，请检查内容格式';
-
-  treeView.appendChild(title);
-  treeView.appendChild(message);
-
-  if (info.snippet) {
-    const snippet = document.createElement('pre');
-    snippet.className = 'parse-error-snippet';
-    snippet.textContent = info.snippet;
-    treeView.appendChild(snippet);
-  }
-
-  const hint = document.createElement('div');
-  hint.className = 'parse-error-hint';
-  hint.textContent = '按提示修改输入框里的内容即可，改完会自动重新解析。';
-  treeView.appendChild(hint);
+  showResultNotice({
+    title: '解析失败',
+    message: info.summary || '解析失败，请检查内容格式',
+    snippet: info.snippet,
+    hint: '按提示修改输入框里的内容即可，改完会自动重新解析。'
+  });
 }
 
 function updateExpandAllButtonTitle() {
@@ -285,13 +301,25 @@ function updateExpandAllButtonTitle() {
   expandAllBtn.setAttribute('aria-label', title);
 }
 
+function updateClearButtonState(hasInput) {
+  /* 输入框为空时它就是「粘贴」，有内容时是「清除」 */
+  const showPaste = !hasInput;
+  const label = showPaste ? '粘贴' : '清除';
+  const title = showPaste ? '粘贴剪贴板内容' : '清空输入内容';
+
+  clearBtn.textContent = label;
+  clearBtn.setAttribute('title', title);
+  clearBtn.setAttribute('aria-label', title);
+  clearBtn.disabled = false;
+}
+
 function updateProcessInputButtonVisibility() {
   const hasInput = Boolean(inputBox.value.trim());
   const shouldShow = hasInput && lastParseFailed;
   processInputBtn.classList.toggle('visible', shouldShow);
   processInputBtn.classList.toggle('attention', shouldShow);
   compactBtn.disabled = !hasInput;
-  clearBtn.disabled = !hasInput;
+  updateClearButtonState(hasInput);
 }
 
 function updateTreeBatchButtons() {
@@ -1023,7 +1051,7 @@ async function renderTreeAsync(data, renderToken) {
   selectedTreeRow = null;
   treeView.innerHTML = '';
   treeView.classList.remove('empty');
-  treeView.classList.remove('parse-error');
+  treeView.classList.remove('notice');
 
   const rootShell = createTreeNodeShell(data);
   treeView.appendChild(rootShell.node);
@@ -1330,7 +1358,7 @@ inputBox.addEventListener('input', () => {
   debounceTimer = setTimeout(processInput, 220);
 });
 
-clearBtn.addEventListener('click', () => {
+function clearInputContent() {
   cancelTreeBatchOperations();
   inputBox.value = '';
   saveInputDraft('');
@@ -1348,6 +1376,105 @@ clearBtn.addEventListener('click', () => {
   updateTreeActionButtons();
   updateProcessInputButtonVisibility();
   updateTreeBatchButtons();
+}
+
+/**
+ * 把一段文本放进输入框并立即解析。
+ * options.focus 为 false 时不抢焦点（例如打开 ?url= 分享链接时，避免手机弹出键盘）。
+ */
+async function applyInputText(text, successMessage, options = {}) {
+  const shouldFocus = options.focus !== false;
+
+  cancelTreeBatchOperations();
+  inputBox.value = text;
+  saveInputDraft(text);
+  clearTreeSearchState();
+  updateProcessInputButtonVisibility();
+
+  if (shouldFocus) {
+    inputBox.focus();
+    try {
+      inputBox.setSelectionRange(text.length, text.length);
+    } catch {
+      // 部分浏览器在未聚焦时不允许设置选区，忽略即可
+    }
+  }
+
+  await processInput();
+  if (successMessage) setStatus(successMessage, 'success');
+}
+
+const IS_APPLE_PLATFORM = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
+const PASTE_SHORTCUT = IS_APPLE_PLATFORM ? '⌘ + V' : 'Ctrl + V';
+
+function focusInputForManualPaste() {
+  inputBox.focus();
+  const end = inputBox.value.length;
+  try {
+    inputBox.setSelectionRange(end, end);
+  } catch {
+    // 忽略选区设置失败
+  }
+}
+
+function describeClipboardError(error) {
+  const name = (error && error.name) || '';
+  if (name === 'NotAllowedError') {
+    return '浏览器拒绝了剪贴板权限，请在地址栏左侧的站点设置里把「剪贴板」改成「允许」';
+  }
+  if (name === 'NotFoundError') {
+    return '剪贴板里没有文本内容';
+  }
+  if (name === 'SecurityError') {
+    return '出于安全限制无法读取剪贴板';
+  }
+  return `读取剪贴板失败${name ? `（${name}）` : ''}`;
+}
+
+/**
+ * 读取剪贴板并填入输入框。
+ *
+ * 浏览器不允许网页静默读取剪贴板，必须满足两个条件：
+ *   1. 安全上下文（HTTPS 或 localhost）
+ *   2. 用户授权（首次会弹权限提示，被拒绝后会一直失败）
+ * 任一不满足都给出具体原因，并把焦点交给输入框，方便直接按快捷键粘贴。
+ */
+async function pasteFromClipboard() {
+  if (!window.isSecureContext || !navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+    setStatus(`当前页面不是安全上下文（需要 HTTPS 或 localhost），浏览器不允许读取剪贴板。请直接按 ${PASTE_SHORTCUT}`, 'error');
+    focusInputForManualPaste();
+    return;
+  }
+
+  // readText 要求文档处于聚焦状态，否则同样会抛 NotAllowedError
+  if (!document.hasFocus()) {
+    inputBox.focus();
+  }
+
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch (error) {
+    setStatus(`${describeClipboardError(error)}；也可以直接按 ${PASTE_SHORTCUT}`, 'error');
+    focusInputForManualPaste();
+    return;
+  }
+
+  if (!text) {
+    setStatus('剪贴板里没有文本内容', 'error');
+    focusInputForManualPaste();
+    return;
+  }
+
+  await applyInputText(text, '已粘贴剪贴板内容');
+}
+
+clearBtn.addEventListener('click', () => {
+  if (inputBox.value.trim()) {
+    clearInputContent();
+  } else {
+    void pasteFromClipboard();
+  }
 });
 
 processInputBtn.addEventListener('click', () => {
@@ -1403,6 +1530,31 @@ updateTreeBatchButtons();
 const SHARED_URL_PARAM = 'url';
 const REMOTE_FETCH_ENDPOINT = '/api/fetch';
 
+/* 与 server.js 的 REMOTE_FETCH_MAX_BYTES 保持一致，仅用于本地展示与直连兜底拦截。 */
+const REMOTE_FETCH_MAX_BYTES = 20 * 1024 * 1024;
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '未知大小';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function buildTooLargeMessage(info) {
+  const limit = formatBytes(info.limitBytes || REMOTE_FETCH_MAX_BYTES);
+  const actual = info.contentLength ? `（实际 ${formatBytes(info.contentLength)}）` : '';
+  return `链接返回的内容过大${actual}，超过 ${limit} 上限，已停止下载`;
+}
+
+/** 内容过大时在结果区给出醒目提示，而不是只在一行状态栏里闪过。 */
+function showTooLargeNotice(info) {
+  showResultNotice({
+    title: '内容过大，已停止下载',
+    message: buildTooLargeMessage(info),
+    hint: '换一个更小的链接，或让数据提供方分页、加筛选条件。'
+  });
+}
+
 function readSharedUrlParam() {
   try {
     const value = new URLSearchParams(window.location.search).get(SHARED_URL_PARAM);
@@ -1432,22 +1584,81 @@ async function requestRemoteJson(target) {
   }
 
   if (!response.ok || payload.ok === false) {
-    throw new Error(payload.error || `获取链接内容失败（HTTP ${response.status}）`);
+    const error = new Error(payload.error || `获取链接内容失败（HTTP ${response.status}）`);
+    error.code = payload.code || 'fetch-failed';
+    error.limitBytes = payload.limitBytes;
+    error.contentLength = payload.contentLength;
+    throw error;
   }
 
   return payload;
 }
 
+/* 直连兜底时同样要拦截，阈值见上方 REMOTE_FETCH_MAX_BYTES。 */
+function createTooLargeError(bytes) {
+  const error = new Error(
+    `链接内容过大（${formatBytes(bytes)}），超过 ${formatBytes(REMOTE_FETCH_MAX_BYTES)} 上限，已停止下载`
+  );
+  error.code = 'payload-too-large';
+  error.limitBytes = REMOTE_FETCH_MAX_BYTES;
+  error.contentLength = bytes;
+  return error;
+}
+
+async function cancelResponseBody(response) {
+  try {
+    if (response.body && typeof response.body.cancel === 'function') {
+      await response.body.cancel();
+    }
+  } catch {
+    // 取消失败不影响主流程
+  }
+}
+
+/**
+ * 直连兜底：先看 Content-Length，超限就不下载；分块传输则流式累加，超限即中断。
+ */
 async function requestRemoteJsonDirect(target) {
   const response = await fetch(target, {
     headers: { Accept: 'application/json, text/plain, */*' }
   });
 
   if (!response.ok) {
-    throw new Error(`链接返回 HTTP ${response.status}`);
+    const error = new Error(`链接返回 HTTP ${response.status}`);
+    error.code = 'upstream-status';
+    throw error;
   }
 
-  const text = await response.text();
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > REMOTE_FETCH_MAX_BYTES) {
+    await cancelResponseBody(response);
+    throw createTooLargeError(declaredLength);
+  }
+
+  let text = '';
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let total = 0;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      total += value.length;
+      if (total > REMOTE_FETCH_MAX_BYTES) {
+        throw createTooLargeError(total);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } else {
+    text = await response.text();
+    if (text.length > REMOTE_FETCH_MAX_BYTES) {
+      throw createTooLargeError(text.length);
+    }
+  }
+
   const trimmed = text.trim();
   let isJson = false;
   if (trimmed) {
@@ -1476,6 +1687,11 @@ async function loadJsonFromSharedUrl(target) {
 
   if (!payload) {
     if (!proxyError || !proxyError.proxyUnavailable) {
+      if (proxyError && proxyError.code === 'payload-too-large') {
+        showTooLargeNotice(proxyError);
+        setStatus(buildTooLargeMessage(proxyError), 'error');
+        return;
+      }
       setStatus(`获取链接内容失败：${proxyError?.message || '未知错误'}`, 'error');
       return;
     }
@@ -1483,6 +1699,11 @@ async function loadJsonFromSharedUrl(target) {
     try {
       payload = await requestRemoteJsonDirect(target);
     } catch (directError) {
+      if (directError && directError.code === 'payload-too-large') {
+        showTooLargeNotice(directError);
+        setStatus(buildTooLargeMessage(directError), 'error');
+        return;
+      }
       setStatus(
         `获取链接内容失败：${directError?.message || proxyError.message}（若为跨域限制，请通过带服务端的地址访问）`,
         'error'
@@ -1496,13 +1717,7 @@ async function loadJsonFromSharedUrl(target) {
     return;
   }
 
-  inputBox.value = payload.content;
-  saveInputDraft(inputBox.value);
-  shouldClearSearchOnNextInput = true;
-  clearTreeSearchState();
-  updateProcessInputButtonVisibility();
-  await processInput();
-  setStatus('已从链接加载 JSON 内容', 'success');
+  await applyInputText(payload.content, '已从链接加载 JSON 内容', { focus: false });
 }
 
 let savedInput = '';
