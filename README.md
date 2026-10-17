@@ -86,10 +86,49 @@ https://json.litetools.top/?url=https%3A%2F%2Fexample.com%2Fdata.json
 https://json.litetools.top/?url=http%3A%2F%2F127.0.0.1%3A64201%2Finfo&app=literedis
 ```
 
-前提（两个都要满足）：
+#### ⚠️ 浏览器差异：Safari 会拦截「HTTPS 页面 → http://」
 
-1. **目标服务要允许跨域** —— 需要返回 `Access-Control-Allow-Origin` 响应头。浏览器直连受同源策略约束，没这个头就会被拦。
-2. **`http://localhost` 和 `http://127.0.0.1` 都不受混合内容拦截** —— HTTPS 页面访问它们是允许的（浏览器把这两个视为可信来源，已实测验证）。**换成公网 http 域名则会被混合内容策略拦掉。**
+这一点必须按浏览器区分，实测结论：
+
+| 页面 | 目标 | Chrome / Edge | Safari |
+|---|---|---|---|
+| `https://` | `http://127.0.0.1` | ✅ 允许 | ❌ **被拦截** |
+| `https://` | `http://localhost` | ✅ 允许 | ❌ **被拦截** |
+| `http://` | `http://127.0.0.1` | ✅ 允许 | ✅ 允许 |
+
+Safari 的控制台会明确写：
+
+```
+[blocked] The page at https://... requested insecure content from http://127.0.0.1:... .
+          This content was blocked and must be served over HTTPS.
+```
+
+**Chrome 把 localhost / 127.0.0.1 视为可信来源，Safari 不认这个例外。** 所以：
+
+- **用 Safari 时，`https://json.litetools.top/` 无法直连你本机的 http 服务**，怎么配 CORS 都没用。
+- 要么改用 Chrome / Edge，要么按下面「本机运行」的方式走服务端代理。
+
+#### 推荐：本机运行，让服务端自己取数据
+
+如果这个工具和你的本地服务在**同一台机器**上，最省事的做法是本地起服务，让服务端直接取——**服务端到服务端不涉及 CORS，也不涉及混合内容**，浏览器是什么都无所谓：
+
+```bash
+# 放行本机地址（更收紧的写法：FETCH_ALLOW_HOSTS=127.0.0.1）
+FETCH_ALLOW_PRIVATE=1 node server.js
+```
+
+然后访问：
+
+```
+http://localhost:3456/?url=http%3A%2F%2F127.0.0.1%3A64201%2Finfo%2Fxxx
+```
+
+这条路要求你的本地服务**什么都不用改**——不用加 `Access-Control-Allow-Origin`，不用处理 `OPTIONS`。
+
+#### 走线上页面直连时，需要满足两个前提
+
+1. **目标服务要允许跨域** —— 需要返回 `Access-Control-Allow-Origin`。浏览器直连受同源策略约束，没这个头就会被拦，**错误响应（401/405）也必须带**。
+2. **浏览器允许混合内容** —— 见上表，Safari 不满足这一条。
 
 > **`localhost` 和 `127.0.0.1` 在 CORS 眼里是两个不同的 origin。** 本地服务的 `Access-Control-Allow-Origin` 必须写你实际用来打开页面的那个，两个都要就写两条。
 
@@ -98,6 +137,23 @@ https://json.litetools.top/?url=http%3A%2F%2F127.0.0.1%3A64201%2Finfo&app=litere
 什么情况下**不会**重试直连：`url` 本身格式非法、重定向目标无效、内容超过 20MB、服务端令牌校验失败。这些属于输入或授权问题，重试也是一样的结果，所以直接报错。
 
 ### 接入规范：让「受信任的本地软件」对接线上页面
+
+#### 先搞清楚：哪一项该配在哪一边
+
+CORS 的原理是**被访问的那一方**决定允许谁来读它的数据。你的本地服务是「被读」的，所以跨域相关的配置全在它那边；这个页面只是「发起请求」的一方，不需要任何 CORS 配置。
+
+| 配置项 | 配在哪 | 作用 |
+|---|---|---|
+| `Access-Control-Allow-Origin` | **你的本地服务** | 允许我们的页面读取数据。**所有响应都要带，包括 401 / 404 / 500** |
+| `Vary: Origin` | **你的本地服务** | 白名单按来源动态返回时的缓存正确性 |
+| 应用标识校验（可选） | **你的本地服务** | 识别调用方是否受信 |
+| `OPTIONS` 预检处理 | **你的本地服务**（仅在用 `?token=` 时需要） | 用 `?app=` 时不触发预检，不用实现 |
+| `FETCH_LOCAL_APP` | 本页面服务端（启动参数） | 允许**服务端自己**去访问内网地址 |
+| `FETCH_TOKEN` | 本页面服务端（启动参数） | 限定谁能调用 `/api/fetch` |
+
+> ⚠️ **最容易踩的坑**：只给 200 响应加了 CORS 头，忘了给错误响应加。这样一来浏览器读不到 401 的响应体，只能报一个笼统的 `Load failed`（Safari）或 `Failed to fetch`（Chrome），完全看不出真正原因。
+
+**重要**：如果你的 literedis 跑在自己电脑上、页面用的是线上 `json.litetools.top`，那么**本页面这一侧完全不需要配置**——浏览器直连那条路径就能到你的机器。只有当你把本页面也部署在同一台机器上、想让服务端自己去取数据时，才需要 `FETCH_LOCAL_APP`。
 
 #### 应用标识（`?app=`）—— 不用密钥的轻量方案
 
@@ -112,7 +168,13 @@ https://json.litetools.top/?url=http%3A%2F%2F127.0.0.1%3A64201%2Finfo&app=litere
 | 去处 | 形式 | 作用 |
 |---|---|---|
 | 我们服务端的 `/api/fetch` | 查询参数 `?app=` | 匹配 `FETCH_LOCAL_APP` 时，**本次请求**放行内网地址 |
-| 你的本地服务 | 请求头 `X-Json-Pretty-App` | 你的服务据此识别「这是受信任的调用方」 |
+| 你的本地服务 | **URL 查询参数 `?app=literedis`**（自动追加到 `url` 后面） | 你的服务据此识别「这是受信任的调用方」 |
+
+浏览器直连时，`app` 会被拼到目标地址后面，例如 `http://127.0.0.1:64201/info?app=literedis`。
+
+**为什么放在查询串而不是请求头**：自定义请求头会触发 CORS 预检（OPTIONS）。很多本地小服务没实现 OPTIONS，会直接返回 405，浏览器于是中止整个请求、连 GET 都不发出去。放进查询串就是「简单请求」，不触发预检——**你的服务只要回 `Access-Control-Allow-Origin` 就够了，不用处理 OPTIONS**。
+
+`app` 不是密钥，写进 URL 不会泄露敏感信息。
 
 **服务端启用方式**：
 
@@ -146,15 +208,24 @@ FETCH_TOKEN=你的密钥 node server.js
 
 比较用定长比较，不泄露时间信息。`app` 和 `token` 可以同时用，也可以只用其中一个。
 
-#### 为什么标识走请求头而不是拼进 URL
-
-请求头不会写进访问日志，也不会在目标服务发生重定向时泄露给下一个地址。
-
-> 自定义请求头会让跨域请求产生一次 OPTIONS 预检，所以你的服务**必须**处理 `OPTIONS` 并在响应里放行对应的头，否则带头请求根本发不出去。这是最常见的踩坑点。
+> 令牌是密钥，所以走**请求头**（`X-Json-Pretty-Token`）而不是 URL——不会写进访问日志，也不会在目标服务重定向时泄露。
+> 代价是自定义请求头会触发 OPTIONS 预检，用 `token` 时你的服务**必须**处理 `OPTIONS` 并放行该头。**只用 `app` 则不需要**。
 
 #### CORS 来源白名单（你的本地服务侧）
 
-强烈建议把 `Access-Control-Allow-Origin` 写成**确切的来源**而不是 `*`：
+`Access-Control-Allow-Origin` 填的是**打开页面的那个地址的 origin**，不是你本地服务的地址——这是最容易搞反的一点。
+
+格式是 `协议://主机:端口`，**不带路径、不带结尾斜杠**：
+
+| 你用什么地址打开这个页面 | 就填什么 |
+|---|---|
+| `https://json.litetools.top/` | `https://json.litetools.top` |
+| `http://localhost:3456/` | `http://localhost:3456` |
+| `http://127.0.0.1:3456/` | `http://127.0.0.1:3456` |
+
+必须**精确匹配**：实测多一个结尾斜杠（`http://localhost:3456/`）就会被浏览器拦掉。`localhost` 和 `127.0.0.1` 也是两个不同的 origin，用哪个就填哪个，两个都用就写两条。
+
+推荐做法是**把请求头里的 `Origin` 原样返回**，配合白名单：
 
 ```js
 const ALLOWED_ORIGINS = [
@@ -162,56 +233,124 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3456',           // 本地调试
   'http://127.0.0.1:3456'            // 本地调试（与上一行是不同的 origin）
 ];
+
+const origin = req.headers.origin;
+if (ALLOWED_ORIGINS.includes(origin)) {
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');   // 按来源动态返回时必须加
+}
 ```
 
-写成 `*` 意味着**你访问的任何网站**都能读你本地服务返回的内容。写成确切来源后，只有我们的页面能读——这一层由浏览器强制，比任何标识都更难绕过。
+写成 `*` 也能用，但意味着**你访问的任何网站**都能读你本地服务返回的内容。写成确切来源后，只有我们的页面能读——这一层由浏览器强制，比任何标识都更难绕过。
 
-写成 `*` 意味着**任何网站**都能读你本地服务返回的内容。写成确切来源后，只有我们的页面能读——这一层由浏览器强制，比令牌更难绕过。
+> 不确定该填什么？先在你的本地服务里把 `req.headers.origin` 打印出来，浏览器发过来的那个值就是要填的。
 
 #### 你的本地服务需要实现的最小约定
 
-```http
-OPTIONS /info
-Origin: https://json.litetools.top
-Access-Control-Request-Method: GET
-Access-Control-Request-Headers: x-json-pretty-app
-```
-
-响应（预检必须放行自定义头，否则后续请求发不出去）：
+**只用 `?app=` 时，请求是「简单请求」，不触发预检。你只需要一件事：所有响应都带上 `Access-Control-Allow-Origin`。**
 
 ```http
-204 No Content
-Access-Control-Allow-Origin: https://json.litetools.top
-Access-Control-Allow-Methods: GET, OPTIONS
-Access-Control-Allow-Headers: Content-Type, Accept, X-Json-Pretty-App, X-Json-Pretty-Token
-Vary: Origin
+GET /info?app=literedis
+Origin: http://localhost:3456
 ```
 
-```http
-GET /info
-Origin: https://json.litetools.top
-X-Json-Pretty-App: literedis
-```
-
-响应：
+成功响应：
 
 ```http
 200 OK
 Content-Type: application/json
-Access-Control-Allow-Origin: https://json.litetools.top
+Access-Control-Allow-Origin: http://localhost:3456
+Vary: Origin
 
 {"a": 1, "b": [2, 3]}
 ```
 
+失败响应 —— **同样要带 CORS 头**，否则浏览器读不到，页面只能显示 `Load failed`：
+
+```http
+401 Unauthorized
+Content-Type: application/json
+Access-Control-Allow-Origin: http://localhost:3456
+Vary: Origin
+
+{"error": "unauthorized"}
+```
+
 要点：
 
-1. **`OPTIONS` 返回 204，不要 200 带 body**
-2. **`Access-Control-Allow-Headers` 必须包含你用到的自定义头**（`X-Json-Pretty-App` 或 `X-Json-Pretty-Token`），漏了对应请求会被浏览器直接掐断
-3. **`Vary: Origin`** —— 白名单按来源动态返回时必须加，否则 CDN/代理可能把 A 来源的响应缓存给 B 来源
-4. 来源不在白名单时，**不要返回任何 CORS 头**，让浏览器自己拒绝
-5. **没有 `Origin` 头的请求说明不是浏览器**（比如服务端代理）—— 跳过 CORS 检查，只校验应用标识即可，响应里也不用带 CORS 头
+1. **`Access-Control-Allow-Origin` 要加在所有响应上**，包括 401 / 403 / 404 / 500。这是最常见的坑
+2. **`Vary: Origin`** —— 白名单按来源动态返回时必须加，否则 CDN/代理可能把 A 来源的响应缓存给 B 来源
+3. 来源不在白名单时，**不要返回任何 CORS 头**，让浏览器自己拒绝
+4. **没有 `Origin` 头的请求说明不是浏览器**（比如服务端代理）—— 跳过 CORS 检查即可，响应里也不用带 CORS 头
 
-判定顺序建议：先处理 `OPTIONS` 预检 → 再校验 Origin 白名单 → 最后校验应用标识。反过来会在服务端代理场景下误拒。
+**只有用 `?token=` 时**才需要额外处理 `OPTIONS` 预检（因为令牌走请求头）：
+
+```http
+OPTIONS /info
+Origin: http://localhost:3456
+Access-Control-Request-Method: GET
+Access-Control-Request-Headers: x-json-pretty-token
+```
+
+```http
+204 No Content
+Access-Control-Allow-Origin: http://localhost:3456
+Access-Control-Allow-Methods: GET, OPTIONS
+Access-Control-Allow-Headers: Content-Type, Accept, X-Json-Pretty-Token
+Vary: Origin
+```
+
+判定顺序：`OPTIONS` 预检（如有）→ Origin 白名单 → 应用标识校验。
+
+#### 完整示例（可直接抄进你的本地服务）
+
+下面这段**不需要实现 OPTIONS**，只要改 `ALLOWED_ORIGINS` 和 `APP` 即可用：
+
+```js
+const http = require('http');
+
+const PORT = 64201;
+const APP = 'literedis';
+
+// ★ 填「打开页面的那个地址的 origin」：协议://主机:端口，不带路径、不带结尾斜杠。
+//   localhost 和 127.0.0.1 是两个不同的 origin，用哪个写哪个。
+const ALLOWED_ORIGINS = [
+  'https://json.litetools.top',
+  'http://localhost:3456',
+  'http://127.0.0.1:3456'
+];
+
+http.createServer((req, res) => {
+  const origin = req.headers.origin || null;
+  // 有 Origin 说明是浏览器请求，必须在白名单；没有说明不是浏览器（如服务端代理），跳过
+  const originAllowed = origin ? ALLOWED_ORIGINS.includes(origin) : true;
+
+  // ★ 关键：所有响应都带 CORS 头，包括下面 403/401 的分支
+  const headers = { 'Content-Type': 'application/json; charset=utf-8', Vary: 'Origin' };
+  if (origin && originAllowed) headers['Access-Control-Allow-Origin'] = origin;
+
+  // 1) 来源白名单（仅浏览器请求）
+  if (origin && !originAllowed) {
+    res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: 'origin not allowed' }));
+    return;
+  }
+
+  // 2) 应用标识：浏览器直连时我们把它放在查询串里
+  const app = new URL(req.url, 'http://localhost').searchParams.get('app') || '';
+  if (app !== APP) {
+    res.writeHead(401, headers);   // ← 注意这里也用了带 CORS 的 headers
+    res.end(JSON.stringify({ error: 'app 标识不匹配' }));
+    return;
+  }
+
+  // 3) 正常返回你的数据
+  res.writeHead(200, headers);
+  res.end(JSON.stringify({ a: 1, b: [2, 3] }));
+}).listen(PORT, '127.0.0.1', () => {
+  console.log(`literedis: http://127.0.0.1:${PORT}`);
+});
+```
 
 **内容大小限制（20MB）**
 

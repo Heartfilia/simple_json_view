@@ -1564,10 +1564,8 @@ function readSharedUrlParam() {
   }
 }
 
-/* 浏览器直连时用于标识「受信任调用方」的请求头名 */
+/* 浏览器直连时用于携带密钥的请求头名（app 标识不是密钥，走查询串） */
 const TOKEN_HEADER = 'X-Json-Pretty-Token';
-/* 应用标识头：与服务端 FETCH_LOCAL_APP 对应，也供目标服务自行校验 */
-const APP_HEADER = 'X-Json-Pretty-App';
 
 function readSharedToken() {
   try {
@@ -1652,19 +1650,24 @@ async function requestRemoteJsonDirect(target) {
   const app = readSharedApp();
   const headers = { Accept: 'application/json, text/plain, */*' };
 
-  if (app) {
-    /*
-     * 应用标识走请求头而不是拼进 URL：不会写进访问日志，
-     * 也不会在目标服务发生重定向时泄露给下一个地址。
-     * 代价是跨域请求会触发预检（OPTIONS），目标服务需要放行该头。
-     */
-    headers[APP_HEADER] = app;
-  }
+  /*
+   * 应用标识拼进 URL 的查询串，而不是走请求头。
+   *
+   * 原因：自定义请求头会触发 CORS 预检（OPTIONS）。很多本地小服务根本没实现
+   * OPTIONS，会直接返回 405，浏览器于是中止整个请求、连 GET 都不发出去，
+   * 页面只能看到一个笼统的 "Load failed"。
+   * 放进查询串就变成「简单请求」，不触发预检——目标服务只要回
+   * Access-Control-Allow-Origin 即可，不必处理 OPTIONS。
+   *
+   * app 本身不是密钥，写进 URL 不会泄露敏感信息。
+   * 令牌（token）是密钥，仍然走请求头，不落到 URL 上。
+   */
+  const targetUrl = app ? appendQueryParam(target, 'app', app) : target;
   if (token) {
     headers[TOKEN_HEADER] = token;
   }
 
-  const response = await fetch(target, { headers });
+  const response = await fetch(targetUrl, { headers });
 
   if (!response.ok) {
     const error = new Error(`链接返回 HTTP ${response.status}`);
@@ -1731,12 +1734,14 @@ function describeDirectFetchFailure(directError, target) {
 
   if (isLocalTarget) {
     return (
-      `${message}。浏览器直连本地服务失败，通常是该服务没允许跨域：` +
-      '它需要返回 Access-Control-Allow-Origin 响应头'
+      `${message}。浏览器没能读到本地服务的响应，常见原因：` +
+      '① 服务没返回 Access-Control-Allow-Origin（**错误响应 401/405 也必须带**）；' +
+      '② 服务地址或端口不对；' +
+      '③ 请求被服务自身的鉴权拒绝。具体原因可看浏览器控制台'
     );
   }
 
-  return `${message}。通常是跨域限制（目标站点需要返回 Access-Control-Allow-Origin），或该地址在当前网络下不可达`;
+  return `${message}。通常是跨域限制（目标站点需要返回 Access-Control-Allow-Origin，错误响应也要带），或该地址在当前网络下不可达`;
 }
 
 function safeHostname(rawUrl) {
@@ -1744,6 +1749,17 @@ function safeHostname(rawUrl) {
     return new URL(rawUrl).hostname;
   } catch {
     return '';
+  }
+}
+
+/* 往 URL 上追加查询参数，自动处理已有的 ? 与 # */
+function appendQueryParam(rawUrl, key, value) {
+  try {
+    const url = new URL(rawUrl);
+    url.searchParams.set(key, value);
+    return url.toString();
+  } catch {
+    return rawUrl;
   }
 }
 
