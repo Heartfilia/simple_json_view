@@ -77,14 +77,23 @@ https://json.litetools.top/?url=https%3A%2F%2Fexample.com%2Fdata.json
 
 ### 指向你自己本机的服务
 
-`?url=` 的地址是**服务端**去访问的，所以服务端的 `localhost` 是服务器自己，不是你的电脑——直接写 `localhost` 必然被 SSRF 防护拦截，这是应该的。
+**先理解一个容易混淆的点**：`?url=` 里的 `127.0.0.1` / `localhost` 指的是**谁的回环地址**，取决于这次请求由谁发出：
 
-遇到这种情况，页面会**自动退回浏览器直连**：这时请求从你本机发出，`localhost` 就真的是你的机器了。
+| 谁发起请求 | `127.0.0.1` 指谁 | 能不能拿到你的数据 |
+|---|---|---|
+| 服务端（`/api/fetch` 代理） | 部署这个工具的**服务器自己** | ❌ 拿不到你的电脑 |
+| 你的浏览器（直连兜底） | **你正在用的这台电脑** | ✅ 能拿到 |
+
+所以线上页面写 `?url=http://127.0.0.1:64201/...` 时，**服务端那条路是走不通的**——它的 `127.0.0.1` 是服务器自己，不是你的机器。
+
+页面已经处理了这一点：**检测到「页面不在本机 + 目标也是本机地址」时，直接跳过服务端代理**，省掉一次必然失败的往返，也不会再给出「内网地址已被拦截」这种误导性报错。状态栏会提示「目标是你本机的地址，服务端访问不到，正在用浏览器直连…」。
 
 ```
 # 你本机 64201 端口有个服务
 https://json.litetools.top/?url=http%3A%2F%2F127.0.0.1%3A64201%2Finfo&app=literedis
 ```
+
+剩下唯一的路径就是**浏览器直连**——这时请求从你本机发出，`127.0.0.1` 才真的是你的机器。但它受下面两条限制。
 
 #### ⚠️ 浏览器差异：Safari 会拦截「HTTPS 页面 → http://」
 
@@ -136,7 +145,7 @@ http://localhost:3456/?url=http%3A%2F%2F127.0.0.1%3A64201%2Finfo%2Fxxx
 
 什么情况下**不会**重试直连：`url` 本身格式非法、重定向目标无效、内容超过 20MB、服务端令牌校验失败。这些属于输入或授权问题，重试也是一样的结果，所以直接报错。
 
-### 接入规范：让「受信任的本地软件」对接线上页面
+### 接入规范：让自己的本地服务对接本页面
 
 #### 先搞清楚：哪一项该配在哪一边
 
@@ -148,14 +157,11 @@ CORS 的原理是**被访问的那一方**决定允许谁来读它的数据。�
 | `Vary: Origin` | **你的本地服务** | 白名单按来源动态返回时的缓存正确性 |
 | 应用标识校验（可选） | **你的本地服务** | 识别调用方是否受信 |
 | `OPTIONS` 预检处理 | **你的本地服务**（仅在用 `?token=` 时需要） | 用 `?app=` 时不触发预检，不用实现 |
-| `FETCH_LOCAL_APP` | 本页面服务端（启动参数） | 允许**服务端自己**去访问内网地址 |
 | `FETCH_TOKEN` | 本页面服务端（启动参数） | 限定谁能调用 `/api/fetch` |
 
 > ⚠️ **最容易踩的坑**：只给 200 响应加了 CORS 头，忘了给错误响应加。这样一来浏览器读不到 401 的响应体，只能报一个笼统的 `Load failed`（Safari）或 `Failed to fetch`（Chrome），完全看不出真正原因。
 
-**重要**：如果你的 literedis 跑在自己电脑上、页面用的是线上 `json.litetools.top`，那么**本页面这一侧完全不需要配置**——浏览器直连那条路径就能到你的机器。只有当你把本页面也部署在同一台机器上、想让服务端自己去取数据时，才需要 `FETCH_LOCAL_APP`。
-
-#### 应用标识（`?app=`）—— 不用密钥的轻量方案
+#### 应用标识（`?app=`）—— 只做「调用方标签」
 
 页面 URL 上加 `app` 参数：
 
@@ -163,53 +169,44 @@ CORS 的原理是**被访问的那一方**决定允许谁来读它的数据。�
 https://json.litetools.top/?url=http%3A%2F%2F127.0.0.1%3A64201%2Finfo&app=literedis
 ```
 
-这一个标识会用在两个地方：
-
-| 去处 | 形式 | 作用 |
-|---|---|---|
-| 我们服务端的 `/api/fetch` | 查询参数 `?app=` | 匹配 `FETCH_LOCAL_APP` 时，**本次请求**放行内网地址 |
-| 你的本地服务 | **URL 查询参数 `?app=literedis`**（自动追加到 `url` 后面） | 你的服务据此识别「这是受信任的调用方」 |
-
-浏览器直连时，`app` 会被拼到目标地址后面，例如 `http://127.0.0.1:64201/info?app=literedis`。
+浏览器直连时，`app` 会被拼到目标地址后面（`http://127.0.0.1:64201/info?app=literedis`）；服务端代理抓取时，则以请求头 `X-Json-Pretty-App` 转发。你的服务可以据此识别调用方。
 
 **为什么放在查询串而不是请求头**：自定义请求头会触发 CORS 预检（OPTIONS）。很多本地小服务没实现 OPTIONS，会直接返回 405，浏览器于是中止整个请求、连 GET 都不发出去。放进查询串就是「简单请求」，不触发预检——**你的服务只要回 `Access-Control-Allow-Origin` 就够了，不用处理 OPTIONS**。
 
-`app` 不是密钥，写进 URL 不会泄露敏感信息。
-
-**服务端启用方式**：
-
-```bash
-FETCH_LOCAL_APP=literedis node server.js
-```
-
-不设置则 `?app=` 不产生任何放行效果（默认行为不变）。
-
-**它解决什么问题**：当你的工具和本地服务跑在**同一台机器**上时，服务端自己就能访问 `127.0.0.1:64201`，比绕一圈浏览器直连更快。这时用 `?app=literedis` 打开通这一条路，而不必全局打开 `FETCH_ALLOW_PRIVATE=1`。
-
-> ⚠️ `app` 标识**不是密钥**，只是一个应用名，用来把「允许摸内网」限定给特定场景。知道这个值的任何人都能让服务端去访问内网地址（主要是服务器自己的 localhost）。
-> 如果你的页面部署在公网且在意这一点，请改用下面的访问令牌，或者干脆不配 `FETCH_LOCAL_APP`——浏览器直连那条路径本来就能到你的机器，不需要这个开关。
+> ⚠️ `app` **只是一个标签，不是密钥，也没有任何特权**。它不会放宽内网访问限制——内网放行范围只由服务端环境变量 `FETCH_ALLOW_HOSTS` / `FETCH_ALLOW_PRIVATE` 决定，不接受请求参数控制。
+> 早期版本曾用 `?app=` 放行内网地址，那是个设计缺陷（谁知道这个值谁就能摸内网），已移除。
 
 #### 访问令牌（`?token=`）—— 需要密钥时
 
 页面 URL 上加 `token` 参数：
 
 ```
-https://json.litetools.top/?url=http%3A%2F%2Flocalhost%3A3000%2Fsource%2Fxxx&token=你的密钥
+https://json.litetools.top/?url=http%3A%2F%2Flocalhost%3A3000%2Fsource%2Fxxx#token=你的密钥
 ```
 
 | 去处 | 形式 | 作用 |
 |---|---|---|
-| 我们服务端的 `/api/fetch` | 查询参数 `?token=` | 只有持有密钥的调用方能用我们的抓取接口 |
+| 我们服务端的 `/api/fetch` | 请求头 `X-Json-Pretty-Token` | 只有持有密钥的调用方能用我们的抓取接口 |
 | 你的本地服务 | 请求头 `X-Json-Pretty-Token` | 你的服务据此识别「这是受信任的调用方」 |
 
 ```bash
 FETCH_TOKEN=你的密钥 node server.js
 ```
 
-比较用定长比较，不泄露时间信息。`app` 和 `token` 可以同时用，也可以只用其中一个。
+比较用定长比较（`crypto.timingSafeEqual`），不泄露时间信息。`app` 和 `token` 可以同时用，也可以只用其中一个。
 
-> 令牌是密钥，所以走**请求头**（`X-Json-Pretty-Token`）而不是 URL——不会写进访问日志，也不会在目标服务重定向时泄露。
+**令牌放在 URL 片段里，不要放查询串：**
+
+```
+✅ https://json.litetools.top/?url=...&app=literedis#token=你的密钥
+❌ https://json.litetools.top/?url=...&app=literedis&token=你的密钥
+```
+
+`#` 后面的片段**不会发送给服务器**，因此不会出现在 Nginx 访问日志里。查询串则会——默认的 `combined` 日志格式会记录完整 URI。两种写法页面都能读，但只有片段是安全的。
+
+> 令牌是密钥，所以发往 `/api/fetch` 和你的服务时**都走请求头**（`X-Json-Pretty-Token`），不落到请求 URL 上。
 > 代价是自定义请求头会触发 OPTIONS 预检，用 `token` 时你的服务**必须**处理 `OPTIONS` 并放行该头。**只用 `app` 则不需要**。
+> 令牌不写 `localStorage`——密钥留在浏览器存储里只会增加暴露面，而且服务端换令牌后会导致莫名其妙的 401。
 
 #### CORS 来源白名单（你的本地服务侧）
 
@@ -385,8 +382,50 @@ FETCH_ALLOW_PRIVATE=1 npm start
 | `HOST` | `0.0.0.0` | 监听地址，反向代理场景建议设为 `127.0.0.1` |
 | `FETCH_ALLOW_HOSTS` | 空 | 允许抓取的内网域名白名单，逗号分隔，支持 `*.example.com` |
 | `FETCH_ALLOW_PRIVATE` | 空 | 设为 `1` 放行全部内网地址，仅限内网自用 |
-| `FETCH_LOCAL_APP` | 空 | 应用标识。请求带 `?app=<此值>` 时，**该次请求**放行内网地址 |
-| `FETCH_TOKEN` | 空 | 设置后 `/api/fetch` 必须带匹配的 `?token=`，用于限定受信任的调用方 |
+| `FETCH_TOKEN` | 空 | 设置后 `/api/fetch` 必须带匹配的 `X-Json-Pretty-Token` 请求头 |
+| `TRUST_PROXY` | 空 | 部署在 Nginx 后面时设为 `1`，从 `X-Forwarded-For` 取真实客户端 IP 用于限流 |
+
+> `FETCH_ALLOW_HOSTS` 里的内网放行范围**只由这两个环境变量控制**，任何请求参数都无法放宽。
+
+## 安全说明
+
+### `/api/fetch` 的防护
+
+这个接口本质上是一个「你让它抓什么它就抓什么」的代理，所以几层防护是必须的：
+
+| 防护 | 做法 |
+|---|---|
+| SSRF | 解析域名后逐个检查所有 A/AAAA 记录，命中私有/保留网段即拒绝 |
+| DNS 重绑定 | 解析结果会**钉死**在连接上（自定义 `lookup`），建立连接时不再重新解析 |
+| 协议限制 | 只允许 `http` / `https`，其余协议直接拒绝 |
+| 重定向 | 手动跟随，**每一跳都重新做一次地址校验** |
+| 大小限制 | 20MB。带 `Content-Length` 的拿到响应头就掐断，分块传输的流式累加到上限即中断 |
+| 超时 | 空闲 12s（每收到一块就重置）+ 总预算 60s |
+| 并发 | 同时最多 8 个远端抓取，避免少量请求吃满内存 |
+| 限流 | 每 IP 每分钟 60 次 |
+| 鉴权 | 可选 `FETCH_TOKEN`，定长比较 |
+| 只回传 JSON | 响应体不是 JSON 时**不把内容返回给调用方**，只回 `isJson: false`。这样它不能当通用爬虫代理用 |
+
+内网判断覆盖的网段：
+
+- IPv4：`0/8`、`10/8`、`100.64/10`、`127/8`、`169.254/16`、`172.16/12`、`192.0.0/24`、`192.168/16`、`198.18/15`、`224/4` 及以上
+- IPv6：`::`、`::1`、`fe80::/10`、`fc00::/7`、`ff00::/8`、`2001:db8::/32`
+- **IPv4 映射地址**（`::ffff:127.0.0.1`、`::ffff:7f00:1`、`::ffff:192.168.1.1` 等）、IPv4 兼容地址、NAT64（`64:ff9b::/96`）—— 会取出内嵌的 IPv4 再判断
+
+> 这一点曾经出过漏洞：WHATWG URL 解析器会把 `::ffff:127.0.0.1` 归一化成 `::ffff:7f00:1`，早期实现只认点分形式，导致这类地址能完全绕过内网拦截。现已改为解析成 8 个 16 位分组后按位掩码判断。
+
+### 页面防护
+
+- **CSP**：`default-src 'self'`，脚本、样式、Worker 全部同源，禁止内联与 `eval`。只有 `connect-src` 放开为 `*`——浏览器直连兜底需要请求用户指定的任意地址，这是功能本身决定的。
+- **`X-Content-Type-Options: nosniff`**、**`Referrer-Policy: no-referrer`**、**`X-Frame-Options: DENY`**
+- JSON 内容渲染全部走 `textContent` 或 `escapeHtml`，不拼接未转义的用户数据到 `innerHTML`
+
+### 已知限制
+
+- **不配 `FETCH_TOKEN` 时 `/api/fetch` 是开放接口**：任何知道地址的人都能让服务器去抓公网 JSON。防护只剩限流（每 IP 每分钟 60 次）和「只回传 JSON」。个人小站可以接受，流量和 IP 声誉敏感的场景建议开启令牌。
+- 令牌、`url` 参数都会出现在**浏览器历史**里。分享链接前请自行判断。
+- 输入框内容会存进 `localStorage`（草稿功能）。在公用电脑上用完记得清除。
+- 开启 `FETCH_ALLOW_PRIVATE=1` 或 `FETCH_ALLOW_HOSTS=*` 后，内网拦截**完全失效**，启动时会打印警告。这类配置只适合内网自用。
 
 ## 部署到 Linux 服务器
 
@@ -452,6 +491,35 @@ sudo ufw enable
 
 3456 端口**不要**对外开放，只留 80 / 443。
 
+**7. 开启抓取接口令牌（公网部署强烈建议）**
+
+不开的话 `/api/fetch` 就是一个开放代理，任何人都能拿你的服务器抓取任意地址、刷流量。
+
+```bash
+sudo mkdir -p /etc/json-pretty
+printf 'FETCH_TOKEN=%s\n' "$(openssl rand -hex 32)" | sudo tee /etc/json-pretty/env
+sudo chmod 600 /etc/json-pretty/env
+sudo systemctl daemon-reload && sudo systemctl restart json-pretty
+```
+
+**令牌必须写在 `/etc/json-pretty/env`，不要直接写进 systemd 单元。** `deploy.sh` 每次安装都会用 `deploy/json-pretty.service` 重新生成单元文件，写在里面的内容会被覆盖——令牌一丢，接口就悄悄变回开放状态。
+
+验证是否生效：
+
+```bash
+curl -s "http://127.0.0.1:3456/api/fetch?url=https%3A%2F%2Fexample.com%2F"
+# 应返回 {"ok":false,"code":"unauthorized",...}
+
+journalctl -u json-pretty -n 20 | grep 访问令牌
+# 应显示「已启用」
+```
+
+之后页面链接需要带上令牌：
+
+```
+https://json.litetools.top/?url=...#token=你的令牌
+```
+
 ### 需要抓取内网接口时
 
 编辑 systemd 单元，解开 `FETCH_ALLOW_HOSTS` 那行：
@@ -461,6 +529,8 @@ sudo vim /etc/systemd/system/json-pretty.service
 # Environment=FETCH_ALLOW_HOSTS=api.rhino.datastory.com.cn,*.corp.example.com
 sudo systemctl daemon-reload && sudo systemctl restart json-pretty
 ```
+
+> 注意这一项和令牌不同，它不敏感，可以直接写在单元里。但如果重新跑 `deploy.sh install`，这行也会被覆盖——长期使用建议也放到 `/etc/json-pretty/env` 里（`EnvironmentFile` 里的值优先生效）。
 
 ### 更新代码
 

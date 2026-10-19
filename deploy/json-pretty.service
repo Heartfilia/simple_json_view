@@ -14,6 +14,22 @@ Environment=NODE_ENV=production
 Environment=PORT=3456
 # 只监听回环地址，外部访问一律经 Nginx 转发，服务本身不暴露公网。
 Environment=HOST=127.0.0.1
+# 部署在 Nginx 后面：真实客户端 IP 在 X-Forwarded-For 里。
+# 不开这个的话，限流会把所有访客当成同一个 IP（都是 127.0.0.1）。
+Environment=TRUST_PROXY=1
+
+# --------------------------- 敏感配置 -----------------------------
+# 令牌这类敏感项请写到 /etc/json-pretty/env，**不要写在本文件里**：
+# deploy.sh 每次安装都会用 deploy/json-pretty.service 重新生成这个单元，
+# 直接改这里的内容会被覆盖掉（令牌一丢，抓取接口就变回人人可用的开放代理）。
+#
+#   sudo mkdir -p /etc/json-pretty
+#   printf 'FETCH_TOKEN=%s\n' "$(openssl rand -hex 32)" | sudo tee /etc/json-pretty/env
+#   sudo chmod 600 /etc/json-pretty/env
+#   sudo systemctl daemon-reload && sudo systemctl restart json-pretty
+#
+# 行首的 - 表示该文件不存在也不报错。
+EnvironmentFile=-/etc/json-pretty/env
 
 # ---------------- ?url= 抓取接口的内网放行策略 ----------------
 # 默认会拦截解析到内网 IP 的地址（防 SSRF）。需要抓取内网接口时，

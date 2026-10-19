@@ -1567,7 +1567,24 @@ function readSharedUrlParam() {
 /* 浏览器直连时用于携带密钥的请求头名（app 标识不是密钥，走查询串） */
 const TOKEN_HEADER = 'X-Json-Pretty-Token';
 
+/*
+ * 令牌读取顺序：
+ *   1. URL 片段（#token=xxx）—— 片段不会发送给服务器，因此不会进访问日志
+ *   2. 查询串（?token=xxx）—— 兼容旧链接，但会被 Nginx 记录到日志
+ *
+ * 不落 localStorage：令牌是密钥，留在浏览器存储里只会增加暴露面。
+ */
 function readSharedToken() {
+  try {
+    const hash = window.location.hash.replace(/^#/, '');
+    if (hash) {
+      const fromHash = new URLSearchParams(hash).get('token');
+      if (fromHash && fromHash.trim()) return fromHash.trim();
+    }
+  } catch {
+    // 片段解析失败就继续往下找
+  }
+
   try {
     const value = new URLSearchParams(window.location.search).get('token');
     return value ? value.trim() : '';
@@ -1589,12 +1606,16 @@ async function requestRemoteJson(target) {
   const token = readSharedToken();
   const app = readSharedApp();
   const params = [`url=${encodeURIComponent(target)}`];
-  if (token) params.push(`token=${encodeURIComponent(token)}`);
   if (app) params.push(`app=${encodeURIComponent(app)}`);
 
-  const response = await fetch(`${REMOTE_FETCH_ENDPOINT}?${params.join('&')}`, {
-    headers: { Accept: 'application/json' }
-  });
+  /*
+   * 令牌走请求头而不是查询串：查询串会原样写进 Nginx 访问日志，
+   * 请求头不会。同源请求带自定义头不触发预检，没有额外代价。
+   */
+  const headers = { Accept: 'application/json' };
+  if (token) headers[TOKEN_HEADER] = token;
+
+  const response = await fetch(`${REMOTE_FETCH_ENDPOINT}?${params.join('&')}`, { headers });
 
   let payload = null;
   try {
@@ -1730,9 +1751,18 @@ const NO_DIRECT_RETRY_CODES = new Set(['bad-url', 'bad-redirect', 'payload-too-l
 
 function describeDirectFetchFailure(directError, target) {
   const message = (directError && directError.message) || '';
-  const isLocalTarget = /^(localhost|127\.|\[::1\])/i.test(safeHostname(target));
+  const loopback = isLoopbackHost(safeHostname(target));
 
-  if (isLocalTarget) {
+  /* 线上页面 + 本机目标 + Safari：这是混合内容拦截，怎么配 CORS 都没用 */
+  if (loopback && !isLocalPage() && isSafari()) {
+    return (
+      `${message}。Safari 会拦截 HTTPS 页面访问 http:// 地址（127.0.0.1 也不例外），` +
+      '控制台会显示 "requested insecure content ... blocked"。' +
+      '请改用 Chrome / Edge，或在本地运行本工具（FETCH_ALLOW_PRIVATE=1 node server.js）'
+    );
+  }
+
+  if (loopback) {
     return (
       `${message}。浏览器没能读到本地服务的响应，常见原因：` +
       '① 服务没返回 Access-Control-Allow-Origin（**错误响应 401/405 也必须带**）；' +
@@ -1763,16 +1793,49 @@ function appendQueryParam(rawUrl, key, value) {
   }
 }
 
+/* 目标主机是否是「回环地址」——这类地址只在本机有意义 */
+function isLoopbackHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host.endsWith('.localhost')
+  );
+}
+
+/* 当前页面本身是否跑在本机 */
+function isLocalPage() {
+  return isLoopbackHost(location.hostname);
+}
+
+/* 是否是 Safari（Chrome/Edge 的 UA 里也含 Safari，要排除掉） */
+function isSafari() {
+  const ua = navigator.userAgent || '';
+  return /Safari/.test(ua) && !/Chrome|Chromium|Edg|OPR/.test(ua);
+}
+
 async function loadJsonFromSharedUrl(target) {
   setStatus('正在获取链接内容…', 'processing');
 
   let payload = null;
   let proxyError = null;
 
-  try {
-    payload = await requestRemoteJson(target);
-  } catch (error) {
-    proxyError = error;
+  /*
+   * 线上页面 + 目标是本机回环地址：服务端一定够不到。
+   * 服务端的 127.0.0.1 是服务器自己，不是用户的电脑——要么被 SSRF 拦截，
+   * 要么（放行后）取到服务器上的无关服务。所以直接跳过服务端代理，
+   * 省一次必然失败的往返，也避免给出误导性的报错。
+   */
+  const remotePageLocalTarget = isLoopbackHost(safeHostname(target)) && !isLocalPage();
+
+  if (!remotePageLocalTarget) {
+    try {
+      payload = await requestRemoteJson(target);
+    } catch (error) {
+      proxyError = error;
+    }
   }
 
   if (!payload) {
@@ -1788,6 +1851,7 @@ async function loadJsonFromSharedUrl(target) {
     }
 
     const shouldRetryDirectly =
+      remotePageLocalTarget ||
       !proxyError ||
       proxyError.proxyUnavailable ||
       !NO_DIRECT_RETRY_CODES.has(proxyError.code);
@@ -1797,7 +1861,9 @@ async function loadJsonFromSharedUrl(target) {
       return;
     }
 
-    if (proxyError) {
+    if (remotePageLocalTarget) {
+      setStatus('目标是你本机的地址，服务端访问不到，正在用浏览器直连…', 'processing');
+    } else if (proxyError) {
       setStatus('服务端取不到，正在用浏览器直连重试…', 'processing');
     }
 

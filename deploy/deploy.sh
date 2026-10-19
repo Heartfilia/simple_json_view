@@ -188,7 +188,14 @@ if [ "$MODE" = "install" ]; then
    2. 申请 HTTPS 证书
       sudo certbot --nginx -d 你的域名
    3. 放行防火墙 80 / 443（${PORT} 端口不要对外开放）
-   4. 如需抓取内网接口，编辑
+   4. 公网部署建议开启抓取接口令牌，否则任何人都能拿它当免费代理：
+      sudo mkdir -p /etc/json-pretty
+      printf 'FETCH_TOKEN=%s\\n' "\$(openssl rand -hex 32)" | sudo tee /etc/json-pretty/env
+      sudo chmod 600 /etc/json-pretty/env
+      sudo systemctl daemon-reload && sudo systemctl restart $SERVICE_NAME
+      （写在 /etc/json-pretty/env 里，不要直接改 systemd 单元——本脚本
+        每次安装都会重新生成该单元，写在里面的内容会被覆盖）
+   5. 如需抓取内网接口，编辑
       /etc/systemd/system/${SERVICE_NAME}.service
       解开 FETCH_ALLOW_HOSTS 那行并填入你的域名，然后
       systemctl daemon-reload && systemctl restart $SERVICE_NAME
