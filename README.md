@@ -72,11 +72,12 @@ Python 字典属于特殊流程：先按标准 JSON 解析，失败后才启用 
 https://json.litetools.top/?url=https%3A%2F%2Fexample.com%2Fdata.json
 ```
 
-页面会自动请求该链接：返回内容是 JSON 时，直接填入输入框并解析展示；不是 JSON 则只提示、不填充。
+页面会自动请求该链接：返回内容是 JSON 或 Python 字典时，直接填入输入框并解析展示；都不是则只提示、不填充。
 
 - `url` 的值建议做 URL 编码（`encodeURIComponent`）。
 - 抓取由服务端接口 `/api/fetch` 完成，因此需要以 `node server.js` 运行；纯静态部署会退回浏览器直连，此时受目标站点的跨域（CORS）策略限制。
-- 判断是否为 JSON 以 `JSON.parse` 结果为准，不依赖响应头的 `Content-Type`，因此 `text/html` 返回 JSON 体的接口也能识别。
+- 判断是否为数据以整段解析结果为准（标准 JSON 或 Python 字面量），不依赖响应头的 `Content-Type`，因此 `text/html`、`text/plain` 返回 JSON / Python 字典的接口也能识别。
+- 只接受整段文本，不会从 HTML、日志里抠片段；服务端仍然只回传数据结构，不能当通用爬虫代理。
 - 出于安全考虑，`/api/fetch` 只允许 http/https，默认禁止访问内网地址。
 
 ### 指向你自己本机的服务
@@ -408,7 +409,7 @@ FETCH_ALLOW_PRIVATE=1 npm start
 | 并发 | 同时最多 8 个远端抓取，避免少量请求吃满内存 |
 | 限流 | 每 IP 每分钟 60 次 |
 | 鉴权 | 可选 `FETCH_TOKEN`，定长比较 |
-| 只回传 JSON | 响应体不是 JSON 时**不把内容返回给调用方**，只回 `isJson: false`。这样它不能当通用爬虫代理用 |
+| 只回传数据结构 | 响应体不是整段 JSON / Python 字典时**不把内容返回给调用方**，只回 `isJson: false`。不做片段提取，因此不能当通用爬虫代理用 |
 
 内网判断覆盖的网段：
 

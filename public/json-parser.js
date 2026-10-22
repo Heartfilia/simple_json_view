@@ -1423,6 +1423,30 @@
     return null;
   }
 
+  /**
+   * 整段文本解析：只接受标准 JSON，或整段就是一个 Python 数据结构。
+   *
+   * 不做片段提取、不做宽松修复——用于判断「这个响应体本身是不是数据」，
+   * 避免把 HTML / 日志里夹带的 JSON 片段当成接口返回值（服务端代理的安全边界）。
+   */
+  function parseStrictData(input) {
+    const text = stripBom(String(input == null ? '' : input)).trim();
+    if (!text) return { ok: false };
+
+    try {
+      return { ok: true, value: JSON.parse(text), mode: 'json' };
+    } catch {
+      // JSON 失败后再试 Python 字面量
+    }
+
+    const python = parsePythonLiteral(text);
+    if (python.ok && python.value !== null && typeof python.value === 'object') {
+      return { ok: true, value: python.value, mode: 'python-literal' };
+    }
+
+    return { ok: false };
+  }
+
   /* ------------------------------- 候选流 ------------------------------- */
 
   /**
@@ -1824,7 +1848,8 @@
     locateJsonError,
     looksLikeJsonContainer,
     parsePythonLiteral,
-    tryParsePythonFallback
+    tryParsePythonFallback,
+    parseStrictData
   };
 
   root.SmartJSON = api;

@@ -1727,16 +1727,11 @@ async function requestRemoteJsonDirect(target) {
     }
   }
 
-  const trimmed = text.trim();
-  let isJson = false;
-  if (trimmed) {
-    try {
-      JSON.parse(trimmed);
-      isJson = true;
-    } catch {
-      isJson = false;
-    }
-  }
+  /*
+   * 与输入框保持一致：标准 JSON 和 Python 字典都算可解析的数据。
+   * 用整段解析而不是片段提取，避免把网页里夹带的 JSON 误判成接口返回。
+   */
+  const isJson = text.trim() ? SmartJSON.parseStrictData(text).ok : false;
 
   return { ok: true, isJson, content: text };
 }

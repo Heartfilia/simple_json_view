@@ -21,6 +21,8 @@ const fs = require('fs');
 const path = require('path');
 const dns = require('dns');
 const crypto = require('crypto');
+/* 与前端共用同一份解析逻辑：标准 JSON 或 Python 字面量数据结构 */
+const { parseStrictData } = require(path.join(__dirname, 'public', 'json-parser.js'));
 
 const PORT = process.env.PORT || 3456;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -604,23 +606,16 @@ async function handleRemoteFetch(req, res, requestUrl) {
   try {
     const result = await fetchRemoteText(target, { app });
     const trimmed = result.text.trim();
-    let isJson = false;
-
-    if (trimmed) {
-      try {
-        JSON.parse(trimmed);
-        isJson = true;
-      } catch {
-        isJson = false;
-      }
-    }
+    /* Python dict 也属于可解析的数据结构，与前端保持一致 */
+    const isJson = trimmed ? parseStrictData(trimmed).ok : false;
 
     /*
-     * 只有确实是 JSON 才把内容回传。
+     * 只有确实是 JSON / Python 数据结构才把内容回传。
      *
      * 不加这一步的话，这个接口就是个「抓什么返回什么」的通用代理：
      * 别人可以拿它抓任意网页 HTML、图片，流量和追责 IP 都算在你头上。
-     * 限定成「只回传 JSON」之后，它就不能当通用爬虫代理用了。
+     * parseStrictData 只认整段文本，不会从 HTML / 日志里抠片段，
+     * 限定成「只回传数据结构」之后，它就不能当通用爬虫代理用了。
      */
     if (!isJson) {
       sendJson(res, 200, {
