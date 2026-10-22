@@ -598,6 +598,25 @@
     'IPv6Network'
   ]);
 
+  /*
+   * 这些写法 Python 和宽松修复的结果不一样，必须优先走 Python：
+   *   - 三引号
+   *   - Python 特有转义（\x \U \N \a \v、八进制 \0-\7）
+   *   - 相邻字符串自动拼接（'a' 'b'）
+   *
+   * 另外值位置上的括号 / 函数调用（tuple、set()、datetime(...)）也走
+   * Python，省得修复器白跑一趟。其余非标准 JSON（单引号、裸 key、
+   * 尾逗号、true/false/null 等）仍然先走旧的宽松修复，保持原性能。
+   */
+  const PYTHON_LITERAL_HINT = /(?:'''|"""|\\[avxNU0-7]|['"]\s+['"])/;
+  const PYTHON_CALL_HINT = /(?:^|[:,\[])\s*(?:[A-Za-z_][\w.]*\s*)?\(/;
+
+  function prefersPythonLiteral(text) {
+    if (typeof text !== 'string') return false;
+    if (PYTHON_LITERAL_HINT.test(text)) return true;
+    return text.indexOf('(') !== -1 && PYTHON_CALL_HINT.test(text);
+  }
+
   function decodePythonBytes(value) {
     const bytes = new Uint8Array(value.length);
     for (let i = 0; i < value.length; i += 1) {
@@ -1790,16 +1809,22 @@
 
     /*
      * 默认流程：先直接 JSON.parse。
-     * 失败后才进入特殊流程——按 Python 字面量解析（dict / tuple / set /
-     * datetime(...) / Decimal(...) 等）。Python 解析失败才退回宽松修复，
-     * 这样 '''...'''、'\x41'、'a' 'b' 这些 Python 写法不会被修复器改坏。
+     * 失败后根据内容选择顺序：
+     *   - 有 Python 特有写法：先 Python 字面量，再宽松修复。
+     *     否则 '''...'''、'\x41'、'a' 'b' 会被修复器改坏。
+     *   - 普通非标准 JSON（单引号、裸 key、尾逗号等）：先宽松修复，
+     *     保住改造前的性能；修复失败再退回 Python。
      */
     const rawAttempt = attemptParse(text);
     if (rawAttempt.ok) return acceptValue(rawAttempt.value, 'raw');
 
-    const pythonAttempt = tryParsePythonFallback(text);
-    if (pythonAttempt) {
-      return acceptValue(pythonAttempt.value, pythonAttempt.mode);
+    const pythonFirst = prefersPythonLiteral(text);
+
+    if (pythonFirst) {
+      const pythonAttempt = tryParsePythonFallback(text);
+      if (pythonAttempt) {
+        return acceptValue(pythonAttempt.value, pythonAttempt.mode);
+      }
     }
 
     let lastError = rawAttempt.error;
@@ -1813,6 +1838,13 @@
 
       lastError = attempt.error;
       lastCandidate = candidate;
+    }
+
+    if (!pythonFirst) {
+      const pythonAttempt = tryParsePythonFallback(text);
+      if (pythonAttempt) {
+        return acceptValue(pythonAttempt.value, pythonAttempt.mode);
+      }
     }
 
     /*
