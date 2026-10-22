@@ -32,6 +32,9 @@
  *   5. 自动解转义 —— 整段是转义字符串时自动再解析一层。
  *   6. 精确定位 —— 自带 JSON 语法校验器定位出错行列，不依赖各版本
  *      V8 报错文案（Node 20+ 的报错已不再带 position）。
+ *   7. Python 兜底 —— 标准 JSON 解析失败后才启用 Python 字面量解析，
+ *      处理 tuple / set / bytes / datetime(...) 等 JSON 表达不了的结构。
+ *      它排在宽松修复之前，避免 Python 写法先被修复器改坏。
  */
 
 (function (root) {
@@ -53,6 +56,7 @@
   const CODE_0 = 48;
   const CODE_9 = 57;
   const CODE_COLON = 58;
+  const CODE_LPAREN = 40;
   const CODE_A = 65;
   const CODE_E = 69;
   const CODE_Z = 90;
@@ -549,6 +553,876 @@
     return code === CODE_LBRACE || code === CODE_LBRACKET;
   }
 
+  /* --------------------------- Python 字面量解析 --------------------------- */
+
+  /*
+   * Python 的 repr 并不都是 JSON：
+   *   - tuple / set / bytes 不是 JSON 的合法结构
+   *   - datetime.datetime(...) / Decimal('1.2') / UUID('...') 是构造函数调用
+   *   - {1, 2} 是集合，不是对象
+   *
+   * 这些靠 repairLooseJson 修不出来，所以单独实现一个 Python 字面量解析器。
+   * 它只在标准 JSON 解析失败后才启用，且排在宽松修复之前——否则
+   * '''...'''、'\x41'、'a' 'b' 这类 Python 写法会先被修复器改坏。
+   * 属于特殊流程，不会影响合法 JSON 的快路径。
+   *
+   * 输出统一转成 JSON 能表达的值：
+   *   dict → object（非字符串 key 用 Python 的写法转成字符串）
+   *   list / tuple / set → array
+   *   bytes → 尽量按 UTF-8 解码成字符串
+   *   datetime / Decimal / UUID / Path 等 → 可读字符串
+   *   其他未知对象 → 保留原始 repr 文本
+   */
+
+  const PYTHON_MAX_DEPTH = 400;
+  const PYTHON_OPERATOR_WORDS = ['if', 'else', 'and', 'or', 'in', 'is', 'for'];
+  const PYTHON_NUMBER_PATTERNS = [
+    /0[xX][0-9a-fA-F_]+/y,
+    /0[oO][0-7_]+/y,
+    /0[bB][01_]+/y,
+    /(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d+)?/y
+  ];
+  const PYTHON_STRING_CALLS = new Set([
+    'Decimal',
+    'Fraction',
+    'UUID',
+    'Path',
+    'PurePath',
+    'PosixPath',
+    'WindowsPath',
+    'PurePosixPath',
+    'PureWindowsPath',
+    'IPv4Address',
+    'IPv6Address',
+    'IPv4Network',
+    'IPv6Network'
+  ]);
+
+  function decodePythonBytes(value) {
+    const bytes = new Uint8Array(value.length);
+    for (let i = 0; i < value.length; i += 1) {
+      bytes[i] = value.charCodeAt(i) & 0xff;
+    }
+
+    if (typeof TextDecoder !== 'undefined') {
+      try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch {
+        // 不是合法 UTF-8，退回逐字节的 latin1 展示
+      }
+    }
+
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 1) out += String.fromCharCode(bytes[i]);
+    return out;
+  }
+
+  /* dict 的 key 必须是字符串，这里把 Python 的各种 key 转成可读写法。 */
+  function pythonKeyToString(value) {
+    if (typeof value === 'string') return value;
+    if (value === null) return 'None';
+    if (typeof value === 'boolean') return value ? 'True' : 'False';
+    if (typeof value === 'number') return String(value);
+
+    if (Array.isArray(value)) {
+      const inner = value.map(pythonKeyToString).join(', ');
+      return `(${inner}${value.length === 1 ? ',' : ''})`;
+    }
+
+    if (value && typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  function padNumber(value) {
+    return String(value).padStart(2, '0');
+  }
+
+  function formatPythonDatetime(args, kind) {
+    const numbers = args.map((item) => (typeof item === 'number' ? item : 0));
+
+    if (kind === 'time') {
+      const hour = padNumber(numbers[0] || 0);
+      const minute = padNumber(numbers[1] || 0);
+      const second = padNumber(numbers[2] || 0);
+      const clock = `${hour}:${minute}:${second}`;
+      return numbers[3] ? `${clock}.${String(numbers[3]).padStart(6, '0')}` : clock;
+    }
+
+    const year = numbers[0] || 0;
+    const month = padNumber(numbers[1] || 1);
+    const day = padNumber(numbers[2] || 1);
+
+    if (kind === 'date') return `${year}-${month}-${day}`;
+
+    const hour = padNumber(numbers[3] || 0);
+    const minute = padNumber(numbers[4] || 0);
+    const second = padNumber(numbers[5] || 0);
+    const micro = numbers[6] ? `.${String(numbers[6]).padStart(6, '0')}` : '';
+    return `${year}-${month}-${day} ${hour}:${minute}:${second}${micro}`;
+  }
+
+  /**
+   * 解析 Python 字面量。返回 { ok:true, value } 或 { ok:false, error }。
+   */
+  function parsePythonLiteral(input) {
+    const text = String(input == null ? '' : input);
+    const len = text.length;
+    let pos = 0;
+
+    function fail(reason) {
+      const error = new Error(reason);
+      error.position = pos;
+      error.reason = reason;
+      throw error;
+    }
+
+    function isIdentifierStartAt(index) {
+      if (index >= len) return false;
+      const code = text.charCodeAt(index);
+      return (
+        (code >= CODE_A && code <= CODE_Z) ||
+        (code >= CODE_a && code <= CODE_z) ||
+        code === CODE_UNDERSCORE
+      );
+    }
+
+    function isIdentifierPartAt(index) {
+      if (index >= len) return false;
+      return isIdentifierStartAt(index) || isDigitCode(text.charCodeAt(index));
+    }
+
+    function skipSpace() {
+      for (;;) {
+        while (pos < len && isWhitespaceCode(text.charCodeAt(pos))) pos += 1;
+        if (text.charCodeAt(pos) === CODE_HASH) {
+          pos = skipToLineEnd(text, pos + 1);
+          continue;
+        }
+        return;
+      }
+    }
+
+    function readIdentifier() {
+      const start = pos;
+      while (pos < len && isIdentifierPartAt(pos)) pos += 1;
+      if (pos === start) fail('这里期待一个值');
+      return text.slice(start, pos);
+    }
+
+    /* 判断当前位置是不是字符串：可能带 r / b / u / f 或组合前缀。 */
+    function stringStartIndex(index) {
+      let cursor = index;
+      while (cursor < len && cursor - index < 3) {
+        const code = text.charCodeAt(cursor);
+        if (
+          code === 114 || code === 82 || /* r R */
+          code === 98 || code === 66 ||  /* b B */
+          code === 117 || code === 85 || /* u U */
+          code === 102 || code === 70    /* f F */
+        ) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      const quote = text.charCodeAt(cursor);
+      return quote === CODE_QUOTE_D || quote === CODE_QUOTE_S ? cursor : -1;
+    }
+
+    function readHexDigits(count, message) {
+      const chunk = text.slice(pos, pos + count);
+      if (chunk.length < count || !/^[0-9a-fA-F]+$/.test(chunk)) fail(message);
+      pos += count;
+      return chunk;
+    }
+
+    function parseString() {
+      let isRaw = false;
+      let isBytes = false;
+
+      while (pos < len) {
+        const code = text.charCodeAt(pos);
+        if (code === 114 || code === 82) isRaw = true;
+        else if (code === 98 || code === 66) isBytes = true;
+        else if (code === 117 || code === 85) { /* u */ }
+        else if (code === 102 || code === 70) { /* f */ }
+        else break;
+        pos += 1;
+      }
+
+      const quote = text[pos];
+      const triple = text.startsWith(quote + quote + quote, pos);
+      const closer = triple ? quote + quote + quote : quote;
+      pos += closer.length;
+
+      let out = '';
+
+      while (pos < len) {
+        if (text.startsWith(closer, pos)) {
+          pos += closer.length;
+          return isBytes ? decodePythonBytes(out) : out;
+        }
+
+        const code = text.charCodeAt(pos);
+
+        if (code === CODE_BACKSLASH) {
+          if (isRaw) {
+            out += '\\';
+            pos += 1;
+            if (pos < len) {
+              out += text[pos];
+              pos += 1;
+            }
+            continue;
+          }
+
+          pos += 1;
+          if (pos >= len) fail('转义字符不完整');
+          const escaped = text[pos];
+          pos += 1;
+
+          if (escaped === '\n') continue;
+          if (escaped === '\r') {
+            if (text[pos] === '\n') pos += 1;
+            continue;
+          }
+
+          switch (escaped) {
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            case 'v': out += '\v'; break;
+            case 'a': out += '\x07'; break;
+            case '\\': out += '\\'; break;
+            case "'": out += "'"; break;
+            case '"': out += '"'; break;
+            case 'x': out += String.fromCharCode(parseInt(readHexDigits(2, '\\x 转义不完整'), 16)); break;
+            case 'u': out += String.fromCharCode(parseInt(readHexDigits(4, '\\u 转义不完整'), 16)); break;
+            case 'U': {
+              const codePoint = parseInt(readHexDigits(8, '\\U 转义不完整'), 16);
+              out += codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : '\ufffd';
+              break;
+            }
+            case 'N': {
+              if (text[pos] === '{') {
+                const end = text.indexOf('}', pos + 1);
+                if (end === -1) fail('\\N 转义不完整');
+                pos = end + 1;
+                out += '?';
+              } else {
+                out += 'N';
+              }
+              break;
+            }
+            default: {
+              if (escaped >= '0' && escaped <= '7') {
+                let octal = escaped;
+                while (octal.length < 3 && pos < len) {
+                  const next = text[pos];
+                  if (next < '0' || next > '7') break;
+                  octal += next;
+                  pos += 1;
+                }
+                out += String.fromCharCode(parseInt(octal, 8) & 0xff);
+              } else {
+                /* Python 对不认识的转义会保留反斜杠，例如 C:\path */
+                out += '\\' + escaped;
+              }
+            }
+          }
+          continue;
+        }
+
+        out += text[pos];
+        pos += 1;
+      }
+
+      fail('字符串缺少结尾引号');
+    }
+
+    function parseNumber() {
+      let sign = '';
+      if (text[pos] === '+' || text[pos] === '-') {
+        sign = text[pos];
+        pos += 1;
+      }
+
+      if (text.startsWith('Infinity', pos)) {
+        pos += 8;
+        return null;
+      }
+      if (text.startsWith('inf', pos)) {
+        pos += 3;
+        return null;
+      }
+      if (text.startsWith('NaN', pos) || text.startsWith('nan', pos)) {
+        pos += 3;
+        return null;
+      }
+
+      let match = null;
+      for (let i = 0; i < PYTHON_NUMBER_PATTERNS.length; i += 1) {
+        const pattern = PYTHON_NUMBER_PATTERNS[i];
+        pattern.lastIndex = pos;
+        const found = pattern.exec(text);
+        if (found && found.index === pos) {
+          match = found;
+          break;
+        }
+      }
+
+      if (!match) {
+        /* +True / -False 这类写法不常见，按原样返回文本 */
+        if (isIdentifierStartAt(pos)) {
+          const identifier = readIdentifier();
+          return sign + identifier;
+        }
+        fail('数字格式不正确');
+      }
+
+      const literal = match[0].replace(/_/g, '');
+      pos += match[0].length;
+
+      /* Python 的虚数字面量（1j / 2.5j）JSON 表达不了，保留成字符串 */
+      if (text[pos] === 'j' || text[pos] === 'J') {
+        pos += 1;
+        return `${sign}${literal}j`;
+      }
+
+      let value;
+      if (/^0[xX]/.test(literal)) value = parseInt(literal.slice(2), 16);
+      else if (/^0[oO]/.test(literal)) value = parseInt(literal.slice(2), 8);
+      else if (/^0[bB]/.test(literal)) value = parseInt(literal.slice(2), 2);
+      else value = Number(literal);
+
+      if (Number.isNaN(value)) return null;
+      return sign === '-' ? -value : value;
+    }
+
+    function captureBalanced(openIndex) {
+      let depth = 1;
+      let quote = 0;
+      let escaped = false;
+
+      for (let i = pos; i < len; i += 1) {
+        const code = text.charCodeAt(i);
+
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+
+        if (quote) {
+          if (code === CODE_BACKSLASH) escaped = true;
+          else if (code === quote) quote = 0;
+          continue;
+        }
+
+        if (code === CODE_QUOTE_D || code === CODE_QUOTE_S) {
+          quote = code;
+          continue;
+        }
+        if (code === CODE_LPAREN) depth += 1;
+        else if (code === 41) {
+          depth -= 1;
+          if (depth === 0) {
+            const inner = text.slice(openIndex + 1, i);
+            pos = i + 1;
+            return inner;
+          }
+        }
+      }
+
+      fail('括号没有闭合');
+    }
+
+    function parseParen(depth) {
+      const openIndex = pos;
+      pos += 1;
+      skipSpace();
+
+      if (text[pos] === ')') {
+        pos += 1;
+        return [];
+      }
+
+      const first = parseValue(depth + 1);
+      skipSpace();
+
+      if (text[pos] === ',') {
+        const items = [first];
+        while (text[pos] === ',') {
+          pos += 1;
+          skipSpace();
+          if (text[pos] === ')') break;
+          items.push(parseValue(depth + 1));
+          skipSpace();
+        }
+        if (text[pos] !== ')') fail('元组缺少右括号');
+        pos += 1;
+        return items;
+      }
+
+      if (text[pos] === ')') {
+        pos += 1;
+        return first;
+      }
+
+      /* (1+2j) 这类表达式：整体保留成字符串 */
+      return captureBalanced(openIndex);
+    }
+
+    function parseList(depth) {
+      pos += 1;
+      const items = [];
+      skipSpace();
+
+      if (text[pos] === ']') {
+        pos += 1;
+        return items;
+      }
+
+      for (;;) {
+        items.push(parseValue(depth + 1));
+        skipSpace();
+
+        if (text[pos] === ',') {
+          pos += 1;
+          skipSpace();
+          if (text[pos] === ']') break;
+          continue;
+        }
+        break;
+      }
+
+      if (text[pos] !== ']') fail('列表缺少右方括号');
+      pos += 1;
+      return items;
+    }
+
+    function parseDictOrSet(depth) {
+      pos += 1;
+      skipSpace();
+
+      if (text[pos] === '}') {
+        pos += 1;
+        return {};
+      }
+
+      const first = parseValue(depth + 1);
+      skipSpace();
+
+      if (text[pos] === ':') {
+        const result = {};
+        pos += 1;
+        result[pythonKeyToString(first)] = parseValue(depth + 1);
+        skipSpace();
+
+        while (text[pos] === ',') {
+          pos += 1;
+          skipSpace();
+          if (text[pos] === '}') break;
+
+          const key = parseValue(depth + 1);
+          skipSpace();
+          if (text[pos] !== ':') fail('字典项缺少冒号');
+          pos += 1;
+          result[pythonKeyToString(key)] = parseValue(depth + 1);
+          skipSpace();
+        }
+
+        if (text[pos] !== '}') fail('字典缺少右花括号');
+        pos += 1;
+        return result;
+      }
+
+      /* 没有冒号，说明是 {1, 2} 这样的集合 */
+      const items = [first];
+      while (text[pos] === ',') {
+        pos += 1;
+        skipSpace();
+        if (text[pos] === '}') break;
+        items.push(parseValue(depth + 1));
+        skipSpace();
+      }
+
+      if (text[pos] !== '}') fail('集合缺少右花括号');
+      pos += 1;
+      return items;
+    }
+
+    function buildCall(name, args, kwargs, startIndex) {
+      const shortName = name.indexOf('.') === -1 ? name : name.slice(name.lastIndexOf('.') + 1);
+      const rawText = () => text.slice(startIndex, pos);
+
+      if (
+        shortName === 'list' ||
+        shortName === 'tuple' ||
+        shortName === 'set' ||
+        shortName === 'frozenset' ||
+        shortName === 'deque' ||
+        shortName === 'array'
+      ) {
+        const last = args[args.length - 1];
+        return Array.isArray(last) ? last : args;
+      }
+
+      if (
+        shortName === 'dict' ||
+        shortName === 'OrderedDict' ||
+        shortName === 'defaultdict' ||
+        shortName === 'Counter' ||
+        shortName === 'ChainMap'
+      ) {
+        for (let i = args.length - 1; i >= 0; i -= 1) {
+          const item = args[i];
+          if (item && typeof item === 'object' && !Array.isArray(item)) return item;
+          if (
+            Array.isArray(item) &&
+            item.every((pair) => Array.isArray(pair) && pair.length === 2)
+          ) {
+            const result = {};
+            item.forEach((pair) => {
+              result[pythonKeyToString(pair[0])] = pair[1];
+            });
+            return result;
+          }
+        }
+        return {};
+      }
+
+      if (shortName === 'range') {
+        const numbers = args.filter((item) => typeof item === 'number');
+        if (!numbers.length) return [];
+        const startValue = numbers.length > 1 ? numbers[0] : 0;
+        const stopValue = numbers.length > 1 ? numbers[1] : numbers[0];
+        const stepValue = numbers.length > 2 ? numbers[2] : 1;
+        if (stepValue === 0) return [];
+
+        const result = [];
+        const limit = 10000;
+        if (stepValue > 0) {
+          for (let value = startValue; value < stopValue && result.length < limit; value += stepValue) {
+            result.push(value);
+          }
+        } else {
+          for (let value = startValue; value > stopValue && result.length < limit; value += stepValue) {
+            result.push(value);
+          }
+        }
+        return result;
+      }
+
+      if (shortName === 'bytes' || shortName === 'bytearray') {
+        const source = args[0];
+        if (typeof source === 'string') return source;
+        if (Array.isArray(source)) {
+          let raw = '';
+          for (let i = 0; i < source.length; i += 1) {
+            raw += String.fromCharCode(source[i] & 0xff);
+          }
+          return decodePythonBytes(raw);
+        }
+        return '';
+      }
+
+      if (shortName === 'datetime' && name.indexOf('.') !== -1) {
+        return formatPythonDatetime(args, 'datetime');
+      }
+      if ((shortName === 'date' || shortName === 'time') && name.indexOf('.') !== -1) {
+        return formatPythonDatetime(args, shortName);
+      }
+      if (shortName === 'timedelta') {
+        const parts = [];
+        ['weeks', 'days', 'hours', 'minutes', 'seconds', 'milliseconds', 'microseconds'].forEach((key) => {
+          if (kwargs[key] !== undefined && kwargs[key] !== null) {
+            parts.push(`${kwargs[key]} ${key}`);
+          }
+        });
+        return parts.join(', ');
+      }
+
+      if (PYTHON_STRING_CALLS.has(shortName)) {
+        if (shortName === 'Fraction') return args.map((item) => String(item)).join('/');
+        return args.length ? String(args[0]) : '';
+      }
+
+      if (shortName === 'int') {
+        if (!args.length) return 0;
+        const source = args[0];
+        if (typeof source === 'number') return Math.trunc(source);
+        const base = typeof kwargs.base === 'number' ? kwargs.base : 10;
+        const parsed = parseInt(String(source).replace(/_/g, ''), base);
+        return Number.isNaN(parsed) ? 0 : parsed;
+      }
+
+      if (shortName === 'float') {
+        if (!args.length) return 0;
+        const source = args[0];
+        if (typeof source === 'number') return source;
+        const textValue = String(source).trim().toLowerCase();
+        if (/^[+-]?(nan|inf|infinity)$/.test(textValue)) return null;
+        const parsed = Number(textValue.replace(/_/g, ''));
+        return Number.isNaN(parsed) ? 0 : parsed;
+      }
+
+      if (shortName === 'bool') return args.length ? Boolean(args[0]) : false;
+      if (shortName === 'str') return args.length ? String(args[0]) : '';
+
+      /* numpy / pandas 一类标量包装 */
+      if (/^(np|numpy|pd|pandas)\./.test(name) && args.length) return args[0];
+
+      /* 其他未知对象：保留原始 repr 文本，至少不会丢掉信息 */
+      return rawText();
+    }
+
+    function parseCall(name, depth, startIndex) {
+      pos += 1;
+      const args = [];
+      const kwargs = Object.create(null);
+      skipSpace();
+
+      if (text[pos] === ')') {
+        pos += 1;
+        return buildCall(name, args, kwargs, startIndex);
+      }
+
+      for (;;) {
+        skipSpace();
+        if (pos >= len || text[pos] === ')') break;
+
+        if (text[pos] === '*' && text[pos + 1] === '*') {
+          pos += 2;
+          const value = parseValue(depth + 1);
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            Object.assign(kwargs, value);
+          }
+        } else if (text[pos] === '*') {
+          pos += 1;
+          const value = parseValue(depth + 1);
+          if (Array.isArray(value)) args.push(...value);
+        } else {
+          const save = pos;
+          let isKeyword = false;
+          let keyword = '';
+
+          if (isIdentifierStartAt(pos)) {
+            keyword = readIdentifier();
+            skipSpace();
+            if (text[pos] === '=' && text[pos + 1] !== '=') {
+              pos += 1;
+              isKeyword = true;
+            } else {
+              pos = save;
+            }
+          }
+
+          if (isKeyword) {
+            kwargs[keyword] = parseValue(depth + 1);
+          } else {
+            args.push(parseValue(depth + 1));
+          }
+        }
+
+        skipSpace();
+        if (text[pos] === ',') {
+          pos += 1;
+          continue;
+        }
+        break;
+      }
+
+      skipSpace();
+      if (text[pos] !== ')') fail('函数调用缺少右括号');
+      pos += 1;
+      return buildCall(name, args, kwargs, startIndex);
+    }
+
+    function parseNameOrSpecial(depth) {
+      const startIndex = pos;
+
+      if (text.startsWith('...', pos)) {
+        pos += 3;
+        return null;
+      }
+
+      let name = readIdentifier();
+      while (text[pos] === '.' && isIdentifierStartAt(pos + 1)) {
+        pos += 1;
+        name += '.' + readIdentifier();
+      }
+
+      skipSpace();
+      if (text[pos] === '(') return parseCall(name, depth, startIndex);
+
+      if (name === 'True') return true;
+      if (name === 'False') return false;
+      if (name === 'None' || name === 'Ellipsis' || name === 'NotImplemented' || name === 'undefined') {
+        return null;
+      }
+      if (name === 'nan' || name === 'NaN' || name === 'inf' || name === 'Infinity') return null;
+
+      /* Enum 成员（Color.RED）、类名等，保留原样 */
+      return name;
+    }
+
+    function parseAngleRepr() {
+      const start = pos;
+      pos += 1;
+      while (pos < len && text[pos] !== '>') pos += 1;
+      if (pos >= len) fail('对象描述缺少 >');
+      pos += 1;
+      return text.slice(start, pos);
+    }
+
+    function isExpressionOperatorAt(index) {
+      const ch = text[index];
+      if (ch && '+-*/%&|^@<>=!~'.indexOf(ch) !== -1) return true;
+
+      for (let i = 0; i < PYTHON_OPERATOR_WORDS.length; i += 1) {
+        const word = PYTHON_OPERATOR_WORDS[i];
+        if (text.startsWith(word, index) && !isIdentifierPartAt(index + word.length)) return true;
+      }
+      return false;
+    }
+
+    /* 形如 1+2j / 3 * 4 的表达式 JSON 表达不了，整体保留成字符串。 */
+    function captureExpression(startIndex) {
+      let depth = 0;
+      let quote = 0;
+      let escaped = false;
+      let index = pos;
+
+      for (; index < len; index += 1) {
+        const code = text.charCodeAt(index);
+
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (quote) {
+          if (code === CODE_BACKSLASH) escaped = true;
+          else if (code === quote) quote = 0;
+          continue;
+        }
+        if (code === CODE_QUOTE_D || code === CODE_QUOTE_S) {
+          quote = code;
+          continue;
+        }
+        if (code === CODE_LBRACE || code === CODE_LBRACKET || code === CODE_LPAREN) {
+          depth += 1;
+          continue;
+        }
+        if (code === CODE_RBRACE || code === CODE_RBRACKET || code === 41) {
+          if (depth === 0) break;
+          depth -= 1;
+          continue;
+        }
+        if (depth === 0 && (code === CODE_COMMA || code === CODE_COLON)) break;
+      }
+
+      pos = index;
+      return text.slice(startIndex, index).trim();
+    }
+
+    function parseValue(depth) {
+      skipSpace();
+      const startIndex = pos;
+      let value = parseAtom(depth);
+
+      /* Python 的相邻字符串会自动拼接：'a' 'b' → ab */
+      if (typeof value === 'string') {
+        skipSpace();
+        while (stringStartIndex(pos) !== -1) {
+          value += parseString();
+          skipSpace();
+        }
+      }
+
+      skipSpace();
+      if (isExpressionOperatorAt(pos)) return captureExpression(startIndex);
+      return value;
+    }
+
+    function parseAtom(depth) {
+      if (depth > PYTHON_MAX_DEPTH) fail('嵌套层级过深');
+      skipSpace();
+      if (pos >= len) fail('内容不完整，这里还缺一个值');
+
+      const code = text.charCodeAt(pos);
+
+      if (text.startsWith('...', pos)) {
+        pos += 3;
+        return null;
+      }
+      if (code === CODE_LBRACE) return parseDictOrSet(depth);
+      if (code === CODE_LBRACKET) return parseList(depth);
+      if (code === CODE_LPAREN) return parseParen(depth);
+      if (text[pos] === '<') return parseAngleRepr();
+      if (stringStartIndex(pos) !== -1) return parseString();
+
+      if (
+        text[pos] === '+' ||
+        text[pos] === '-' ||
+        isDigitCode(code) ||
+        (text[pos] === '.' && isDigitCode(text.charCodeAt(pos + 1)))
+      ) {
+        return parseNumber();
+      }
+
+      if (isIdentifierStartAt(pos)) return parseNameOrSpecial(depth);
+
+      fail('这里期待一个值（字符串 / 数字 / 字典 / 列表 / 元组 / True / False / None）');
+    }
+
+    try {
+      const value = parseValue(0);
+      skipSpace();
+      if (pos < len) fail('后面的内容无法解析');
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  }
+
+  function looksLikePythonContainer(text) {
+    if (typeof text !== 'string') return false;
+    const code = nextSignificantCode(text, 0);
+    if (code === CODE_LBRACE || code === CODE_LBRACKET || code === CODE_LPAREN) return true;
+
+    /* 顶层也可能直接是 set() / OrderedDict([...]) / range(3) 这类容器构造 */
+    return /^(set|frozenset|list|tuple|dict|OrderedDict|defaultdict|Counter|ChainMap|deque|range)\s*\(/.test(
+      text
+    );
+  }
+
+  /**
+   * Python 兜底流程：只有常规解析全部失败后才会调用。
+   * 只接受最外层是容器（dict / list / tuple / set）的结果，避免把普通文本误判成数据。
+   */
+  function tryParsePythonFallback(text) {
+    if (looksLikePythonContainer(text)) {
+      const direct = parsePythonLiteral(text);
+      if (direct.ok && direct.value && typeof direct.value === 'object') {
+        return { value: direct.value, mode: 'python-literal' };
+      }
+    }
+
+    /* 前后带杂质（日志 / callback(...) / 赋值语句）时，从里面抠片段再试 */
+    const snippets = extractJsonSnippets(text);
+    for (let i = 0; i < snippets.length; i += 1) {
+      if (snippets[i] === text) continue;
+      const parsed = parsePythonLiteral(snippets[i]);
+      if (parsed.ok && parsed.value && typeof parsed.value === 'object') {
+        return { value: parsed.value, mode: 'python-literal-extracted' };
+      }
+    }
+
+    return null;
+  }
+
   /* ------------------------------- 候选流 ------------------------------- */
 
   /**
@@ -879,24 +1753,39 @@
 
     if (!text) return { ok: true, empty: true, value: null, mode: 'empty' };
 
-    let lastError = null;
+    /* 解析成功后的统一出口：整段是转义字符串时再解一层。 */
+    const acceptValue = (value, mode) => {
+      if (typeof value === 'string' && level < MAX_UNWRAP_DEPTH && looksLikeJsonContainer(value)) {
+        const inner = tryParse(value, level + 1);
+        if (inner.ok && !inner.empty && inner.value !== null && typeof inner.value === 'object') {
+          return { ok: true, value: inner.value, mode: mode + '+unwrapped' };
+        }
+      }
+      return { ok: true, value, mode };
+    };
+
+    /*
+     * 默认流程：先直接 JSON.parse。
+     * 失败后才进入特殊流程——按 Python 字面量解析（dict / tuple / set /
+     * datetime(...) / Decimal(...) 等）。Python 解析失败才退回宽松修复，
+     * 这样 '''...'''、'\x41'、'a' 'b' 这些 Python 写法不会被修复器改坏。
+     */
+    const rawAttempt = attemptParse(text);
+    if (rawAttempt.ok) return acceptValue(rawAttempt.value, 'raw');
+
+    const pythonAttempt = tryParsePythonFallback(text);
+    if (pythonAttempt) {
+      return acceptValue(pythonAttempt.value, pythonAttempt.mode);
+    }
+
+    let lastError = rawAttempt.error;
     let lastCandidate = { text, mode: 'raw' };
 
     for (const candidate of candidateStream(text)) {
+      if (candidate.mode === 'raw') continue;
+
       const attempt = attemptParse(candidate.text);
-      if (attempt.ok) {
-        const value = attempt.value;
-
-        /* 整段解析出来是字符串，且内容看着是 JSON —— 再解析一层 */
-        if (typeof value === 'string' && level < MAX_UNWRAP_DEPTH && looksLikeJsonContainer(value)) {
-          const inner = tryParse(value, level + 1);
-          if (inner.ok && !inner.empty && inner.value !== null && typeof inner.value === 'object') {
-            return { ok: true, value: inner.value, mode: candidate.mode + '+unwrapped' };
-          }
-        }
-
-        return { ok: true, value, mode: candidate.mode };
-      }
+      if (attempt.ok) return acceptValue(attempt.value, candidate.mode);
 
       lastError = attempt.error;
       lastCandidate = candidate;
@@ -933,7 +1822,9 @@
     repairLooseJson,
     extractJsonSnippets,
     locateJsonError,
-    looksLikeJsonContainer
+    looksLikeJsonContainer,
+    parsePythonLiteral,
+    tryParsePythonFallback
   };
 
   root.SmartJSON = api;
